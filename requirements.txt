@@ -1,0 +1,6 @@
+# Pinned dependencies for the Kinopoisk scrapers.
+# Install into a virtualenv:  pip install -r requirements.txt
+requests==2.32.3
+beautifulsoup4==4.14.3
+lxml==6.0.2          # faster parser; BeautifulSoup falls back to html.parser if absent
+rookiepy==0.5.6      # reads cookies straight from the browser (for fetch_cookies.py)

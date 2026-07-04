@@ -1,0 +1,29 @@
+# ─── Output: scraper exports (out/kinopoisk, out/imdb) ───
+out/
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+
+# ─── Virtual environments ───
+.venv/
+venv/
+
+# ─── Secrets: cookies / list ids come from env vars — never commit ───
+.env
+.env.*
+!.env.example
+
+# ─── Lint / type-check / test caches ───
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# ─── Editors & AI tooling ───
+.idea/
+.vscode/
+.claude/
+CLAUDE.local.md
+
+# ─── macOS ───
+.DS_Store
