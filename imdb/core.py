@@ -647,6 +647,26 @@ mutation AddConstToList($listId: ID!, $constId: ID!) {
 }
 """.strip()
 
+# Set / clear your personal rating (1..10) on a title — the same operations the
+# IMDb web app sends. rateTitle is an upsert, so re-running is safe.
+RATE_TITLE_MUTATION = """
+mutation UpdateTitleRating($rating: Int!, $titleId: ID!) {
+  rateTitle(input: {rating: $rating, titleId: $titleId}) {
+    rating {
+      value
+    }
+  }
+}
+""".strip()
+
+DELETE_RATING_MUTATION = """
+mutation DeleteTitleRating($titleId: ID!) {
+  deleteTitleRating(input: {titleId: $titleId}) {
+    date
+  }
+}
+""".strip()
+
 
 def graphql(
         session: requests.Session,
@@ -708,6 +728,28 @@ def add_to_list(session: requests.Session, list_id: str, const: str) -> dict:
         operation_name="AddConstToList",
     )
     return (data.get("data") or {}).get("addItemToList") or {}
+
+
+def rate_title(session: requests.Session, const: str, rating: int) -> dict:
+    """Set your personal IMDb rating (1..10) on a title. Returns the new rating."""
+    data = graphql(
+        session,
+        RATE_TITLE_MUTATION,
+        {"titleId": const, "rating": int(rating)},
+        operation_name="UpdateTitleRating",
+    )
+    return (data.get("data") or {}).get("rateTitle") or {}
+
+
+def delete_rating(session: requests.Session, const: str) -> dict:
+    """Clear your personal IMDb rating on a title (undo)."""
+    data = graphql(
+        session,
+        DELETE_RATING_MUTATION,
+        {"titleId": const},
+        operation_name="DeleteTitleRating",
+    )
+    return (data.get("data") or {}).get("deleteTitleRating") or {}
 
 
 # --------------------------------------------------------------------------- #

@@ -31,6 +31,7 @@ account:
 | --- | --- | --- |
 | `imdb.search` | resolves records to IMDb ids via the public suggestion API | no |
 | `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`) | yes |
+| `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`) | yes |
 
 `imdb/core.py` holds the shared bits: the session/cookies, the suggestion‑search
 client, the Kinopoisk→IMDb matcher, and the GraphQL client. See
@@ -273,6 +274,36 @@ Only `decision=accept` rows are added; `review` / `reject` / `unmatched` are
 skipped (`--include-flagged` adds `review` rows too). Filters: `--min-rating N`,
 `--only-positive`, `--limit N`. Titles already in the list are detected and
 skipped, and a bad/expired cookie aborts fast instead of hammering the API.
+
+### 3. Transfer your ratings — `imdb.ratings`
+
+Adding a title to a list doesn't rate it. To carry over the **score you gave on
+Kinopoisk**, `imdb.ratings` sets your personal IMDb rating on each resolved title
+via the `rateTitle` mutation. Both sites rate 1–10, so the value transfers as-is.
+Same reviewable matches file, same `decision` gating and cookies as `imdb.lists`:
+
+```bash
+# resolve your rated movies first (writes out/imdb/from-kinopoisk/ratings.json)
+python -m imdb.search out/kinopoisk/ratings.json -o out/imdb/from-kinopoisk/ratings.json
+
+# dry run — see exactly what would be rated, nothing is sent
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --dry-run
+
+# for real; only movies you rated 8+
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --min-rating 8
+
+# undo: clear the ratings this file set (via deleteTitleRating)
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --delete
+```
+
+Only `decision=accept` rows carrying a 1–10 rating are set (`--include-flagged`
+also rates `review` rows). `rateTitle` is an upsert, so re-running is safe.
+Filters `--min-rating N`, `--only-positive`, `--limit N` apply as in `imdb.lists`.
+
+> **Review first.** A Kinopoisk `ratings.json` export has no original title, so
+> its matches resolve mostly to `review` — eyeball them before rating, since a
+> wrong rating has to be undone one title at a time (that's what `--delete` is
+> for).
 
 ### Any JSON, not just Kinopoisk
 

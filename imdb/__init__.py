@@ -8,10 +8,13 @@ Two thin siblings on top of a shared core:
                  endpoint, no login needed. Writes a reviewable matches file.
 - imdb.lists   — add resolved consts to an IMDb list via the AddConstToList
                  GraphQL mutation. Needs your IMDb cookies.
+- imdb.ratings — set your personal rating (1..10) on each resolved title via
+                 the rateTitle mutation. Needs your IMDb cookies.
 
 Run a step as a module, e.g.:
     python -m imdb.search movies.json -o matches.json
     python -m imdb.lists --from-matches matches.json --list-id ls123456789
+    python -m imdb.ratings --from-matches matches.json --dry-run
 """
 
 from .core import ImdbTitle, Match
