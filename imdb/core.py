@@ -90,10 +90,28 @@ GRAPHQL_HEADERS = {
     "X-Imdb-User-Language": "en-US",
 }
 
-# IMDb title-type ids (the "qid" field in suggestion results), split into
-# series-like vs movie-like, so we can prefer the same kind Kinopoisk had.
-SERIES_QIDS = {"tvSeries", "tvMiniSeries", "tvSpecial", "tvShort", "podcastSeries"}
-MOVIE_QIDS = {"movie", "tvMovie", "short", "video", "musicVideo", "videoGame"}
+# IMDb title-type ids (the "qid" field in suggestion results). We only ever want
+# a Kinopoisk film/series to resolve to a *canonical* title: an actual movie or
+# series. Everything else the suggestion API returns for a `tt` const — video
+# games, music videos, loose clips, single episodes, podcasts — is noise that
+# must never win. Anime is the classic trap: IMDb indexes the series under its
+# English title while a tie-in *game* keeps the romaji title, so the game matches
+# the source name better than the real series. Type is therefore a gate, not a
+# tie-breaker (see score_candidate / _kind_allowed / resolve_const).
+FILM_QIDS = {"movie", "tvMovie"}
+SERIES_QIDS = {"tvSeries", "tvMiniSeries"}
+CANONICAL_QIDS = FILM_QIDS | SERIES_QIDS
+# Non-canonical tt types: a film/series export never legitimately lands on one of
+# these, so they get a hard penalty and are never auto-accepted.
+NONCANONICAL_QIDS = {
+    "videoGame", "musicVideo", "video", "short", "tvShort", "tvSpecial",
+    "tvEpisode", "podcastSeries", "podcastEpisode",
+}
+
+# Score adjustments for the kind gate (subtracted/added in score_candidate).
+KIND_MATCH_BONUS = 0.06     # candidate is the wanted bucket (film vs series)
+WRONG_BUCKET_PENALTY = 0.30 # canonical, but the opposite bucket (movie<->series)
+NONCANONICAL_PENALTY = 0.60 # a game/clip/episode/podcast — almost certainly wrong
 
 YEAR_RE = re.compile(r"(\d{4})")
 
@@ -103,7 +121,13 @@ YEAR_RE = re.compile(r"(\d{4})")
 # --------------------------------------------------------------------------- #
 @dataclass
 class ImdbTitle:
-    """One title hit from the suggestion API (names/videos are filtered out)."""
+    """One hit from the suggestion API — a title (tt...) or, when searching
+    people, a name (nm...).
+
+    Same shape either way: `title` holds the label (the title, or the person's
+    name), `stars` the top-billed cast or the person's known-for credit. For
+    names the API sends no year/kind/category, so those stay None.
+    """
 
     const: str  # tt...
     title: str | None = None
@@ -215,6 +239,12 @@ class FieldMap:
     sentiment: str | None = "user_rating_sentiment"
     id: str | None = "kp_id"
     series_values: set[str] = field(default_factory=lambda: set(SERIES_KIND_VALUES))
+    entity: str = "title"  # "title" -> resolve to tt...; "person" -> resolve to nm...
+    transliterate: bool = True  # person mode: fall back to a transliterated query
+
+    @property
+    def is_person(self) -> bool:
+        return self.entity == "person"
 
     def titles(self, record: dict) -> list[str]:
         """Non-empty search values from `record`, in configured order, deduped."""
@@ -349,6 +379,51 @@ def _parse_year(value) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# Practical Cyrillic -> Latin, for names IMDb doesn't index in Cyrillic. Not a
+# strict standard (IMDb spellings vary: Sergei/Sergey, Alexey/Aleksei) — the
+# fuzzy title scorer absorbs the slack. Used only as a fallback when a record
+# has no Latin form of its own.
+_CYRILLIC_TO_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+
+
+def _has_latin(text: str | None) -> bool:
+    """True if `text` already carries a Latin form worth searching IMDb by."""
+    return bool(text) and bool(_LATIN_RE.search(text))
+
+
+def _is_latin_form(text: str | None) -> bool:
+    """True if `text` is a clean Latin search form — has Latin letters and no
+    Cyrillic. A mixed string like "Иван IV" is *not* one: the Latin part ("IV")
+    isn't a searchable name, so such a record still needs a transliterated query.
+    """
+    return _has_latin(text) and not (text and _CYRILLIC_RE.search(text))
+
+
+def transliterate(text: str | None) -> str:
+    """Best-effort Cyrillic -> Latin, preserving case and non-Cyrillic chars."""
+    if not text:
+        return ""
+    out: list[str] = []
+    for ch in text:
+        rep = _CYRILLIC_TO_LATIN.get(ch.lower())
+        if rep is None:
+            out.append(ch)  # already Latin, digits, spaces, punctuation
+        elif ch.isupper() and rep:
+            out.append(rep[0].upper() + rep[1:])
+        else:
+            out.append(rep)
+    return "".join(out)
+
+
 def suggest(
         session: requests.Session,
         query: str,
@@ -381,13 +456,25 @@ def suggest(
     raise RuntimeError(f"suggestion failed for {q!r}: {last_err}")
 
 
-def search_titles(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
-    """suggest() filtered to titles (id starts with 'tt')."""
+def _search_by_prefix(
+        session: requests.Session, query: str, prefix: str, **kw
+) -> list[ImdbTitle]:
+    """suggest() filtered to entries whose const starts with `prefix`."""
     return [
         ImdbTitle.from_suggestion(e)
         for e in suggest(session, query, **kw)
-        if str(e.get("id", "")).startswith("tt")
+        if str(e.get("id", "")).startswith(prefix)
     ]
+
+
+def search_titles(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
+    """suggest() filtered to titles (id starts with 'tt')."""
+    return _search_by_prefix(session, query, "tt", **kw)
+
+
+def search_people(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
+    """suggest() filtered to names/people (id starts with 'nm')."""
+    return _search_by_prefix(session, query, "nm", **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +494,95 @@ def _title_sim(candidate: str | None, wanted: list[str]) -> float:
     return best
 
 
+def _kind_allowed(kind: str | None, want_series: bool | None) -> bool | None:
+    """Is a candidate's IMDb type acceptable for what we're matching?
+
+    Returns True when the type is canonical and fits the wanted bucket (or the
+    bucket is unknown), False when it's non-canonical (game/clip/episode/podcast)
+    or the opposite bucket (a movie where a series was wanted, or vice versa), and
+    None when the candidate carries no type at all (e.g. a person/name result, so
+    no gate applies). resolve_const turns a False here into a forced review.
+    """
+    if not kind:
+        return None
+    if kind in NONCANONICAL_QIDS:
+        return False
+    if kind not in CANONICAL_QIDS:
+        return None  # unknown/new type: no signal either way
+    if want_series is None:
+        return True  # canonical and we have no bucket preference
+    return kind in SERIES_QIDS if want_series else kind in FILM_QIDS
+
+
+# Sequel / season / part markers: these distinguish entries in a franchise
+# ("Ghost in the Shell 2", "Part II", season "3") and must match exactly — a
+# candidate that adds or changes one is a different entry, not a better spelling.
+_ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$")
+
+
+def _markers(tokens: list[str]) -> set[str]:
+    """Digits and roman numerals in a token list (sequel/season/part markers)."""
+    out: set[str] = set()
+    for t in tokens:
+        if t.isdigit():
+            out.add(t)
+        elif t != "i" and _ROMAN_RE.fullmatch(t):  # bare "i" is too often a word
+            out.add(t)
+    return out
+
+
+# Words that carry no distinguishing weight — ignored when looking for the
+# "extra" subtitle tokens that mark a spin-off / sequel ("Dead Apple", "Reverie").
+_TITLE_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with",
+    "no", "wa", "ga", "de", "e", "la", "le", "el", "los", "las", "der", "die",
+    "das", "und", "part", "season", "movie", "film", "the movie",
+}
+
+
+def _title_penalty(cand_title: str | None, wanted: list[str]) -> float:
+    """Penalty for a candidate that shares a base with the source but adds its
+    own distinctive tokens — the signal difflib's ratio is too soft on.
+
+    SequenceMatcher.ratio() rewards a shared prefix, so "Bungo Stray Dogs: Dead
+    Apple" scores high against "Bungo Stray Dogs" and "Bleu 2" against "Bleu".
+    We take the *best* (lowest-penalty) reading across all wanted strings, then:
+
+      * mismatched sequel markers (digits / roman numerals) -> flat penalty, even
+        for a low base similarity ("2" vs "" or "II" vs "III");
+      * distinctive subtitle words the source lacks -> graded penalty, but only
+        when the two clearly share a base (high ratio), so a pure translation
+        (romaji source vs long English title) is never punished as a "subtitle".
+    """
+    cand = _norm(cand_title)
+    if not cand:
+        return 0.0
+    ctoks = cand.split()
+    cmarkers = _markers(ctoks)
+    best_pen = 1.0
+    for w in wanted:
+        nw = _norm(w)
+        if not nw:
+            continue
+        wtoks = nw.split()
+        ratio = difflib.SequenceMatcher(None, cand, nw).ratio()
+        pen = 0.0
+        if cmarkers != _markers(wtoks):
+            pen += 0.20
+        if ratio >= 0.6:
+            # Exclude sequel/season markers (digits *and* roman numerals) — they
+            # already drew the flat penalty above, so counting them again here
+            # would demote a roman-numbered sequel harder than a digit one.
+            extra = [
+                t for t in ctoks
+                if t not in wtoks and t not in cmarkers and t not in _TITLE_STOPWORDS
+            ]
+            if extra:
+                pen += min(0.25, 0.10 * len(extra))
+        best_pen = min(best_pen, pen)
+    return best_pen if best_pen < 1.0 else 0.0
+
+
 def score_candidate(
         cand: ImdbTitle,
         *,
@@ -416,6 +592,10 @@ def score_candidate(
 ) -> float:
     """Confidence that `cand` is the right title, roughly 0..1."""
     score = _title_sim(cand.title, wanted_titles)
+
+    # A candidate that shares a base with the source but adds a subtitle or a
+    # different sequel marker (spin-off / sequel / other season) is demoted.
+    score -= _title_penalty(cand.title, wanted_titles)
 
     # Year agreement is a strong signal (foreign titles collide a lot).
     if want_year and cand.year:
@@ -429,14 +609,16 @@ def score_candidate(
         else:
             score -= 0.15
 
-    # Kind agreement (movie vs series).
-    if want_series is not None and cand.kind:
-        is_series = cand.kind in SERIES_QIDS
-        is_movie = cand.kind in MOVIE_QIDS
-        if (want_series and is_series) or (not want_series and is_movie):
-            score += 0.06
-        elif is_series or is_movie:
-            score -= 0.08
+    # Type is a gate, not a tie-breaker: a wrong content type must never out-rank
+    # the right one on the strength of a matching year. Non-canonical types
+    # (games, music videos, episodes, podcasts) are pushed well below any
+    # plausible real match; the opposite bucket (movie<->series) is demoted hard
+    # enough that a single matching year can't recover it.
+    if cand.kind in NONCANONICAL_QIDS:
+        score -= NONCANONICAL_PENALTY
+    elif want_series is not None and cand.kind in CANONICAL_QIDS:
+        right_bucket = cand.kind in SERIES_QIDS if want_series else cand.kind in FILM_QIDS
+        score += KIND_MATCH_BONUS if right_bucket else -WRONG_BUCKET_PENALTY
 
     # Not clamped to 1.0: the year/kind bonuses must still separate two titles
     # that both match by name (e.g. the "Succession" series vs the movie), so we
@@ -451,20 +633,45 @@ def resolve_const(
         year: str | int | None = None,
         want_series: bool | None = None,
         pause: float = 0.5,
+        search_fn=search_titles,
+        noun: str = "title",
+        transliterate_fallback: bool = False,
 ) -> Match:
-    """Resolve a list of candidate titles to the best IMDb const.
+    """Resolve a list of candidate strings to the best IMDb const.
 
     `titles` is a priority list of search strings (e.g. original title first,
     then a localized title). Searches by each in turn, merges candidates, scores
     them by title/year/kind, picks the best and records close runners-up. Only
     fills the imdb_* / query_used / score fields; callers own the src_* fields.
+
+    `search_fn` selects what to resolve to: `search_titles` (tt..., the default)
+    or `search_people` (nm...); `noun` just labels errors/review notes to match.
+    Resolving people passes no year/kind, so scoring falls back to name
+    similarity alone.
+
+    `transliterate_fallback`: when no candidate string has a Latin form, add a
+    transliterated guess (IMDb doesn't index Cyrillic names). Such a match is
+    flagged for review, since the transliteration is only a best guess.
     """
     m = Match()
     want_year = _parse_year(year)
     wanted_titles = [t for t in titles if t]
     if not wanted_titles:
-        m.error = "no title to search by"
+        m.error = f"no {noun} to search by"
         return m
+
+    # No clean Latin form to search by? IMDb won't match Cyrillic names, so add a
+    # transliterated fallback — both as a query and as something to score the
+    # Latin candidates against (comparing Latin vs Cyrillic would score ~0). A
+    # partly-Latin string (e.g. "Иван IV") still needs one: its Latin part isn't
+    # a searchable name.
+    used_transliteration = False
+    if transliterate_fallback and not any(_is_latin_form(t) for t in wanted_titles):
+        for t in list(wanted_titles):
+            tr = transliterate(t)
+            if tr and tr != t and tr not in wanted_titles:
+                wanted_titles.append(tr)
+                used_transliteration = True
 
     # Query order as given: original title first (IMDb is indexed by
     # original/English titles), fallbacks after. Dedup, preserve order.
@@ -478,7 +685,7 @@ def resolve_const(
         for i, q in enumerate(queries):
             if i:
                 time.sleep(pause)
-            for cand in search_titles(session, q):
+            for cand in search_fn(session, q):
                 if not cand.const:
                     continue
                 s = score_candidate(
@@ -490,15 +697,20 @@ def resolve_const(
                 prev = scored.get(cand.const)
                 if prev is None or s > prev[0]:
                     scored[cand.const] = (s, cand, q)
-            # Good enough on the original title? Don't bother with the fallback.
-            if scored and max(v[0] for v in scored.values()) >= 0.85:
-                break
+            # Good enough on the original title? Don't bother with the fallback —
+            # but only bail early when the leader is a type we'd actually accept,
+            # so a high-title-sim game/short/wrong-bucket can't lock us out of the
+            # fallback query that would surface the real title.
+            if scored:
+                lead = max(scored.values(), key=lambda v: v[0])
+                if lead[0] >= 0.85 and _kind_allowed(lead[1].kind, want_series) is not False:
+                    break
     except Exception as err:  # noqa: BLE001 — one movie must not kill the run
         m.error = str(err)
         return m
 
     if not scored:
-        m.error = "no IMDb title found"
+        m.error = f"no IMDb {noun} found"
         return m
 
     ranked = sorted(scored.values(), key=lambda v: (-v[0], (v[1].rank or 10**9)))
@@ -523,9 +735,19 @@ def resolve_const(
     ]
 
     # Spell out anything that looks off, so a human can eyeball the right rows.
+    kind_ok = _kind_allowed(best.kind, want_series)
+    exact_year = want_year is not None and best.year == want_year
     reasons: list[str] = []
+    # Type is a hard gate: a non-canonical (game/clip/episode) or opposite-bucket
+    # match never auto-accepts, whatever its score.
+    if kind_ok is False:
+        reasons.append(f"unexpected type ({best.kind or '?'})")
     if title_score < 0.5:
-        reasons.append("title differs from source")
+        reasons.append(f"{noun} differs from source")
+    elif title_score < 0.6 and not (exact_year and kind_ok):
+        # A weak title match must not ride on the year alone; only a strong title,
+        # or an exact-year hit of the right type, is allowed through unattended.
+        reasons.append(f"weak {noun} match (title_score {title_score:.2f})")
     if want_year and best.year is not None:
         diff = abs(best.year - want_year)
         if diff > 1:
@@ -536,6 +758,10 @@ def resolve_const(
         reasons.append("close alternative exists")
     if best_score < 0.6 and not reasons:
         reasons.append("low overall confidence")
+    # Transliteration is a guess (and can land a plausible-but-wrong namesake),
+    # so never auto-accept it — always route it through review.
+    if used_transliteration:
+        reasons.append(f"matched by transliteration ({best_query!r}) — verify")
 
     if reasons:
         m.ambiguous = True
@@ -556,6 +782,57 @@ mutation AddConstToList($listId: ID!, $constId: ID!) {
     modifiedItem {
       itemId
     }
+  }
+}
+""".strip()
+
+# Set / clear your personal rating (1..10) on a title — the same operations the
+# IMDb web app sends. rateTitle is an upsert, so re-running is safe.
+RATE_TITLE_MUTATION = """
+mutation UpdateTitleRating($rating: Int!, $titleId: ID!) {
+  rateTitle(input: {rating: $rating, titleId: $titleId}) {
+    rating {
+      value
+    }
+  }
+}
+""".strip()
+
+DELETE_RATING_MUTATION = """
+mutation DeleteTitleRating($titleId: ID!) {
+  deleteTitleRating(input: {titleId: $titleId}) {
+    date
+  }
+}
+""".strip()
+
+# Mark / unmark a title as watched — the same web-app operations. Note: rating a
+# title already marks it watched (rating is one "watched source"), so these are
+# mainly for titles you watched but didn't rate.
+ADD_WATCHED_MUTATION = """
+mutation AddWatchedTitle($titleId: ID!) {
+  addWatchedTitle(titleId: $titleId) {
+    message {
+      language
+      value
+    }
+    success
+  }
+}
+""".strip()
+
+REMOVE_WATCHED_MUTATION = """
+mutation RemoveWatchedTitle($titleId: ID!) {
+  removeWatchedTitle(titleId: $titleId) {
+    message {
+      language
+      value
+    }
+    remainingWatchedSourceTypes
+    remainingReview {
+      id
+    }
+    success
   }
 }
 """.strip()
@@ -621,6 +898,50 @@ def add_to_list(session: requests.Session, list_id: str, const: str) -> dict:
         operation_name="AddConstToList",
     )
     return (data.get("data") or {}).get("addItemToList") or {}
+
+
+def rate_title(session: requests.Session, const: str, rating: int) -> dict:
+    """Set your personal IMDb rating (1..10) on a title. Returns the new rating."""
+    data = graphql(
+        session,
+        RATE_TITLE_MUTATION,
+        {"titleId": const, "rating": int(rating)},
+        operation_name="UpdateTitleRating",
+    )
+    return (data.get("data") or {}).get("rateTitle") or {}
+
+
+def delete_rating(session: requests.Session, const: str) -> dict:
+    """Clear your personal IMDb rating on a title (undo)."""
+    data = graphql(
+        session,
+        DELETE_RATING_MUTATION,
+        {"titleId": const},
+        operation_name="DeleteTitleRating",
+    )
+    return (data.get("data") or {}).get("deleteTitleRating") or {}
+
+
+def mark_watched(session: requests.Session, const: str) -> dict:
+    """Mark a title as watched. Returns {success, message, ...}."""
+    data = graphql(
+        session,
+        ADD_WATCHED_MUTATION,
+        {"titleId": const},
+        operation_name="AddWatchedTitle",
+    )
+    return (data.get("data") or {}).get("addWatchedTitle") or {}
+
+
+def unmark_watched(session: requests.Session, const: str) -> dict:
+    """Remove a title's watched mark (undo). Returns {success, message, ...}."""
+    data = graphql(
+        session,
+        REMOVE_WATCHED_MUTATION,
+        {"titleId": const},
+        operation_name="RemoveWatchedTitle",
+    )
+    return (data.get("data") or {}).get("removeWatchedTitle") or {}
 
 
 # --------------------------------------------------------------------------- #
@@ -706,6 +1027,9 @@ def resolve_record(
         year=year_val,
         want_series=fm.want_series(record),
         pause=pause,
+        search_fn=search_people if fm.is_person else search_titles,
+        noun="name" if fm.is_person else "title",
+        transliterate_fallback=fm.is_person and fm.transliterate,
     )
     # Graft the resolved bits onto our source-populated Match.
     m.imdb_const = res.imdb_const
@@ -721,6 +1045,37 @@ def resolve_record(
     m.error = res.error
     m.decision = default_decision(m)
     return m
+
+
+def _flag_duplicate_consts(matches: list[Match]) -> int:
+    """Flag rows that collide on a const: if one IMDb id was handed to two or more
+    *different* source titles, at least one match is wrong. A cheap cross-row
+    pass that catches near-name collisions a per-row scorer can't see (e.g. two
+    sibling entries in a franchise both resolving to the same const). Returns how
+    many rows it moved to review.
+
+    Rows carrying the same source title (genuine duplicate input) don't count —
+    only distinct titles sharing a const are suspicious.
+    """
+    by_const: dict[str, list[Match]] = {}
+    for m in matches:
+        if m.imdb_const:
+            by_const.setdefault(m.imdb_const, []).append(m)
+
+    moved = 0
+    for group in by_const.values():
+        if len(group) < 2:
+            continue
+        if len({_norm(m.src_title) for m in group}) < 2:
+            continue  # same source title repeated — not a collision
+        for m in group:
+            note = "duplicate const — the same IMDb id matched another title"
+            m.review = f"{m.review}; {note}" if m.review else note
+            m.ambiguous = True
+            if m.decision == DECISION_ACCEPT:
+                m.decision = DECISION_REVIEW
+                moved += 1
+    return moved
 
 
 def resolve_records(
@@ -751,6 +1106,14 @@ def resolve_records(
         # A trusted const needs no request, so no need to pause after it.
         if i < total and res.query_used != "(provided)":
             time.sleep(pause)
+
+    # Cross-row pass: one const on two different titles means a wrong match.
+    dupes = _flag_duplicate_consts(matches)
+    if dupes:
+        print(
+            f"Flagged {dupes} row(s) for review: duplicate const across titles",
+            file=sys.stderr,
+        )
     return matches
 
 
@@ -857,9 +1220,20 @@ def add_field_map_args(parser) -> None:
     d = FieldMap()
     g = parser.add_argument_group("field mapping (which JSON keys to use)")
     g.add_argument(
+        "--entity", choices=["title", "person"], default="title",
+        help="what to resolve records to: 'title' -> tt... (default), or "
+             "'person' -> nm... (searches by name, defaults --search-fields to "
+             "original_name,name and ignores year/kind)",
+    )
+    g.add_argument(
+        "--no-transliterate", action="store_false", dest="transliterate",
+        help="(person mode) don't add a transliterated fallback query for a "
+             "Cyrillic name that has no Latin form (default: do)",
+    )
+    g.add_argument(
         "--search-fields", metavar="F,F",
         help="keys to search IMDb by, in priority order "
-             f"(default: {','.join(d.search)})",
+             f"(default: {','.join(d.search)}; person mode: original_name,name)",
     )
     g.add_argument("--year-field", metavar="F",
                    help=f"key holding the year, for disambiguation (default: {d.year})")
@@ -893,17 +1267,27 @@ def _picked(value: str | None, default: str | None) -> str | None:
 def field_map_from_args(args) -> FieldMap:
     """Build a FieldMap from the flags added by add_field_map_args."""
     d = FieldMap()
-    search = _split(args.search_fields) if args.search_fields else list(d.search)
+    entity = getattr(args, "entity", "title")
+    person = entity == "person"
+    # People resolve to nm... by name; year/kind don't apply (the suggestion API
+    # sends neither for names). These are overridable by the explicit flags.
+    default_search = ["original_name", "name"] if person else list(d.search)
+    default_year = None if person else d.year
+    default_kind = None if person else d.kind
+
+    search = _split(args.search_fields) if args.search_fields else default_search
     series_values = set(d.series_values)
     if args.series_values:
         series_values |= {v.lower() for v in _split(args.series_values)}
     return FieldMap(
         search=search,
-        year=_picked(args.year_field, d.year),
-        kind=_picked(args.kind_field, d.kind),
+        year=_picked(args.year_field, default_year),
+        kind=_picked(args.kind_field, default_kind),
         const=_picked(args.const_field, d.const),
         rating=_picked(args.rating_field, d.rating),
         sentiment=_picked(args.sentiment_field, d.sentiment),
         id=_picked(args.id_field, d.id),
         series_values=series_values,
+        entity=entity,
+        transliterate=getattr(args, "transliterate", d.transliterate),
     )
