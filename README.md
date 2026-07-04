@@ -249,6 +249,36 @@ Matching prefers the **original title**, then the localized one, and scores by
 title similarity + year + movie/series kind — so e.g. *House of Cards* resolves
 to the 2013 US series rather than the 1990 UK one.
 
+### Reviewing the matches (optionally with a sub‑agent)
+
+Reviewing is just editing the `decision` field of the flagged rows (already at the
+top of the file) and saving. The signal differs by kind:
+
+- **Titles** — the usual flag is `title differs from source` (a localized title
+  vs IMDb's English one). The **year is the tell**: if `imdb_year` equals
+  `src_year` and it's plausibly the same title, `accept` (a low `title_score` is
+  normal here). Look closer when the year is missing/off, or `alternatives` holds
+  a candidate with a near‑equal `score`.
+- **People** — no year to lean on, and transliterated rows are only a guess:
+  confirm `imdb_title` is the right person and watch `alternatives` for namesakes.
+
+A matches file is plain JSON, so a sub‑agent can triage it. A prompt that keeps
+everything local and touches no account:
+
+> Review the IMDb match rows in `<matches-file>` (output of `imdb.search`). Rows
+> with `decision` = `review` or `unmatched` are at the top. For each, compare the
+> source (`src_title` / `src_year`) with the resolved title (`imdb_title` /
+> `imdb_year` / `imdb_const`) and the `alternatives`. If the years agree and it's
+> plausibly the same work, set `decision: accept` (a low `title_score` from a
+> localized title is fine); otherwise pick a better `imdb_const` from
+> `alternatives`, or `reject`. For `unmatched`, try `python -m imdb.search --query
+> "<title>"` to find the id. Edit `decision` in place, send nothing to IMDb, and
+> report the accept / reject / changed counts.
+
+For a people file (`imdb.search --entity person`) add: rows are people (`nm…`)
+with no year — verify the name and check `alternatives` for namesakes via
+`python -m imdb.search --query "<name>" --entity person`.
+
 ### 2. Add to an IMDb list — `imdb.lists`
 
 Adds the `accept` rows to a list via the `AddConstToList` GraphQL mutation. This
