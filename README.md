@@ -3,7 +3,8 @@
 Export your Kinopoisk data — your **rated movies**, your **content lists**
 (favourites, watchlist, anime, …), and your **saved people (stars)** — into
 JSON/CSV, then push it the rest of the way: the **`imdb`** package resolves those
-exports to real IMDb titles and adds them to one of your IMDb lists.
+exports to real IMDb titles (or people) and applies them to your account — add
+them to a **list**, copy over your **ratings**, or mark them **watched**.
 
 Cookies are pulled straight from your browser, so there is nothing to copy‑paste
 and your real user id is auto‑detected — you never type or commit it.
@@ -91,9 +92,9 @@ You can override where cookies come from on any command:
 | `--no-browser-cookie` | disable the automatic browser pull |
 
 The same mechanism covers **IMDb** (`fetch_cookies.py --site imdb`, env
-`IMDB_COOKIE`) and is used by `imdb.lists` when it writes to your list. Only
-`imdb.lists` needs a login — `imdb.search` uses IMDb's public API. See
-[Import into IMDb](#import-into-imdb).
+`IMDB_COOKIE`) and is used by the account‑writing steps (`imdb.lists`,
+`imdb.ratings`, `imdb.watched`). Only those need a login — `imdb.search` uses
+IMDb's public API. See [Import into IMDb](#import-into-imdb).
 
 ## Usage
 
@@ -134,8 +135,8 @@ Each type (Актёры, Актрисы, Режиссёры, favourites, …) is
 `original_name`, `url`, `birth_date`, `photo`.
 
 These are **people**, so resolve them to IMDb name pages (`nm…`) with
-`imdb.search --entity person` (see [Resolve people](#resolve-people-to-imdb-nm)),
-not to titles. IMDb indexes names by their original (Latin) spelling, so a person
+`imdb.search --entity person` (see [Resolving people](#resolving-people-nm)), not
+to titles. IMDb indexes names by their original (Latin) spelling, so a person
 with only a Cyrillic `name` and no `original_name` may come back `unmatched`.
 
 ### Offline (no network, no cookies)
@@ -173,13 +174,19 @@ Each file is a JSON list (or CSV) of movie objects. Common fields:
 
 ## Import into IMDb
 
-Two steps, on purpose: **find** the titles first, **import** them second, so you
-can eyeball the matches before anything touches your account.
+**Resolve once, then apply to your account.** First `imdb.search` turns an export
+into a reviewable matches file; then you apply it however you like. Everything
+that writes to IMDb reads that same file, so you eyeball the matches before
+anything touches your account.
 
 ```
-kinopoisk export ──▶ imdb.search ──▶ matches.json ──▶ imdb.lists ──▶ IMDb list
-     (JSON)          (public API)     (+ decisions)    (your cookies)
+kinopoisk export ──▶ imdb.search ──▶ matches.json ──┬─▶ imdb.lists    (add to a list)
+     (JSON)          (public API)   (+ decisions)   ├─▶ imdb.ratings  (copy your ratings)
+                                                     └─▶ imdb.watched  (mark watched)
 ```
+
+The `imdb.lists` / `imdb.ratings` / `imdb.watched` steps are **independent** —
+run any, all, or none, in any order.
 
 ### Full example (start to finish)
 
@@ -212,7 +219,7 @@ python -m imdb.lists \
 ```
 
 Re‑running is safe — titles already in the list are detected and skipped. The
-steps below break down each command.
+sections below break down each command.
 
 ### 1. Resolve to IMDb ids — `imdb.search`
 
@@ -240,7 +247,7 @@ review them in place — no separate file to reconcile. Each match records **why
 it was flagged (`review`), a `title_score` (how well the title matched), the
 resolved `imdb_const` / `imdb_title` / `imdb_year`, and a few `alternatives`.
 Open the file and change `review` → `accept` (or `reject`) where needed, then
-hand the same file to `imdb.lists`.
+hand the same file to the apply steps.
 
 Prefer a separate filtered worklist? Pass `--review-file` (or `--review-out
 <path>`) to also write just those rows to `<out>.review.<ext>`.
@@ -249,7 +256,7 @@ Matching prefers the **original title**, then the localized one, and scores by
 title similarity + year + movie/series kind — so e.g. *House of Cards* resolves
 to the 2013 US series rather than the 1990 UK one.
 
-### Reviewing the matches (optionally with a sub‑agent)
+#### Reviewing the matches (optionally with a sub‑agent)
 
 Reviewing is just editing the `decision` field of the flagged rows (already at the
 top of the file) and saving. The signal differs by kind:
@@ -279,108 +286,7 @@ For a people file (`imdb.search --entity person`) add: rows are people (`nm…`)
 with no year — verify the name and check `alternatives` for namesakes via
 `python -m imdb.search --query "<name>" --entity person`.
 
-### 2. Add to an IMDb list — `imdb.lists`
-
-Adds the `accept` rows to a list via the `AddConstToList` GraphQL mutation. This
-writes to **your account**, so you must be **logged into IMDb** in your browser —
-the cookies are pulled from there via `fetch_cookies` (same as the scrapers).
-Verify they're readable first:
-
-```bash
-python fetch_cookies.py --site imdb    # should print a cookie string, not an error
-```
-
-The cookie‑override flags from [Authentication](#authentication-cookies) apply
-here too (`--cookie`, `--cookie-file`, `--browser`, `--no-browser-cookie`); the
-env var is `IMDB_COOKIE`. Find the list id in its URL: `imdb.com/list/ls123456789/`
-→ `ls123456789` (or set `IMDB_LIST_ID`).
-
-```bash
-# dry run first — see exactly what would be added, nothing is sent
-python -m imdb.lists \
-    --from-matches out/imdb/from-kinopoisk/content-lists/12345678-my-list.json \
-    --list-id ls123456789 --dry-run
-
-# for real; only titles you rated 7+ on Kinopoisk
-python -m imdb.lists --from-matches <file> --list-id ls123456789 --min-rating 7
-```
-
-Only `decision=accept` rows are added; `review` / `reject` / `unmatched` are
-skipped (`--include-flagged` adds `review` rows too). Filters: `--min-rating N`,
-`--only-positive`, `--limit N`. Titles already in the list are detected and
-skipped, and a bad/expired cookie aborts fast instead of hammering the API.
-
-### 3. Transfer your ratings — `imdb.ratings`
-
-Adding a title to a list doesn't rate it. To carry over the **score you gave on
-Kinopoisk**, `imdb.ratings` sets your personal IMDb rating on each resolved title
-via the `rateTitle` mutation. Both sites rate 1–10, so the value transfers as-is.
-Same reviewable matches file, same `decision` gating and cookies as `imdb.lists`:
-
-```bash
-# resolve your rated movies first (writes out/imdb/from-kinopoisk/ratings.json)
-python -m imdb.search out/kinopoisk/ratings.json -o out/imdb/from-kinopoisk/ratings.json
-
-# dry run — see exactly what would be rated, nothing is sent
-python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --dry-run
-
-# for real; only movies you rated 8+
-python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --min-rating 8
-
-# undo: clear the ratings this file set (via deleteTitleRating)
-python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --delete
-```
-
-Only `decision=accept` rows carrying a 1–10 rating are set (`--include-flagged`
-also rates `review` rows). `rateTitle` is an upsert, so re-running is safe.
-Filters `--min-rating N`, `--only-positive`, `--limit N` apply as in `imdb.lists`.
-
-> **Review first.** A Kinopoisk `ratings.json` export has no original title, so
-> its matches resolve mostly to `review` — eyeball them before rating, since a
-> wrong rating has to be undone one title at a time (that's what `--delete` is
-> for).
-
-### 4. Mark titles watched — `imdb.watched`
-
-To reflect what you've **watched** (e.g. a Kinopoisk "Просмотренные" list),
-`imdb.watched` marks each resolved title watched via `addWatchedTitle`. Same
-matches file, `decision` gating and cookies as above:
-
-```bash
-python -m imdb.watched --from-matches matches.json --dry-run
-python -m imdb.watched --from-matches matches.json                 # mark watched
-python -m imdb.watched --from-matches matches.json --unwatch       # undo
-```
-
-Filters `--min-rating N`, `--only-positive`, `--limit N` and `--include-flagged`
-apply as elsewhere. **Rating a title already marks it watched**, so if you ran
-`imdb.ratings` those are covered — `imdb.watched` is for titles you watched but
-didn't rate.
-
-If you're adding to a list anyway, `imdb.lists --mark-watched` does both in one
-pass (add to the list **and** mark watched):
-
-```bash
-python -m imdb.lists --from-matches matches.json --list-id ls123456789 --mark-watched
-```
-
-### Any JSON, not just Kinopoisk
-
-Point the field map at your own keys — the defaults match a Kinopoisk export:
-
-```bash
-python -m imdb.search items.json \
-    --search-fields name,localName --year-field releaseYear --kind-field type
-
-# already have the IMDb id in the record? trust it, skip the search
-python -m imdb.search items.json --const-field imdb_id
-```
-
-Keys: `--search-fields` (priority list of fields to search by), `--year-field`,
-`--kind-field`, `--const-field`, `--id-field`, `--rating-field`,
-`--sentiment-field`, `--series-values`, `--entity`.
-
-### Resolve people to IMDb (nm…)
+#### Resolving people (nm…)
 
 By default `imdb.search` resolves records to **titles** (`tt…`). Pass
 `--entity person` to resolve **people** to IMDb name pages (`nm…`) instead — it
@@ -398,7 +304,7 @@ python -m imdb.search --query "Leonardo DiCaprio" --entity person
 
 The output is the same reviewable matches file as for titles (`decision` /
 `review` / `unmatched`, plus `imdb_const` holding the `nm…`). Note that IMDb
-lists hold titles, so `imdb.lists` is for `tt…` matches, not resolved people.
+lists hold titles, so the apply steps are for `tt…` matches, not resolved people.
 
 **Cyrillic names.** IMDb indexes names by their original (Latin) spelling, so a
 Cyrillic query alone finds nothing. When a record has no Latin form at all
@@ -410,6 +316,106 @@ vary, and a namesake can slip in), so these matches are always flagged
 Pass `--no-transliterate` to turn this off (Cyrillic-only names then stay
 `unmatched`).
 
+#### Any JSON, not just Kinopoisk
+
+Point the field map at your own keys — the defaults match a Kinopoisk export:
+
+```bash
+python -m imdb.search items.json \
+    --search-fields name,localName --year-field releaseYear --kind-field type
+
+# already have the IMDb id in the record? trust it, skip the search
+python -m imdb.search items.json --const-field imdb_id
+```
+
+Keys: `--search-fields` (priority list of fields to search by), `--year-field`,
+`--kind-field`, `--const-field`, `--id-field`, `--rating-field`,
+`--sentiment-field`, `--series-values`, `--entity`.
+
+### 2. Apply to your IMDb account
+
+Everything below reads the reviewed matches file and writes to **your IMDb
+account**, so you must be **logged into IMDb** in your browser — the cookies are
+pulled from there via `fetch_cookies` (same as the scrapers). Verify they're
+readable first:
+
+```bash
+python fetch_cookies.py --site imdb    # should print a cookie string, not an error
+```
+
+Only `decision=accept` rows are used; the cookie‑override flags from
+[Authentication](#authentication-cookies) apply here too (`--cookie`,
+`--cookie-file`, `--browser`, `--no-browser-cookie`), and every command takes
+`--dry-run`. The three actions are **independent** — pick any.
+
+#### Add to a list — `imdb.lists`
+
+Adds the `accept` rows to a list via the `AddConstToList` GraphQL mutation. Find
+the list id in its URL: `imdb.com/list/ls123456789/` → `ls123456789` (or set
+`IMDB_LIST_ID`).
+
+```bash
+# dry run first — see exactly what would be added, nothing is sent
+python -m imdb.lists \
+    --from-matches out/imdb/from-kinopoisk/content-lists/12345678-my-list.json \
+    --list-id ls123456789 --dry-run
+
+# for real; only titles you rated 7+ on Kinopoisk
+python -m imdb.lists --from-matches <file> --list-id ls123456789 --min-rating 7
+```
+
+`review` / `reject` / `unmatched` rows are skipped (`--include-flagged` adds
+`review` rows too). Filters: `--min-rating N`, `--only-positive`, `--limit N`.
+Titles already in the list are detected and skipped, and a bad/expired cookie
+aborts fast instead of hammering the API. Pass `--mark-watched` to also mark each
+added title watched in the same pass.
+
+#### Transfer your ratings — `imdb.ratings`
+
+Adding a title to a list doesn't rate it. To carry over the **score you gave on
+Kinopoisk**, `imdb.ratings` sets your personal IMDb rating on each resolved title
+via the `rateTitle` mutation. Both sites rate 1–10, so the value transfers as-is:
+
+```bash
+# resolve your rated movies first (writes out/imdb/from-kinopoisk/ratings.json)
+python -m imdb.search out/kinopoisk/ratings.json -o out/imdb/from-kinopoisk/ratings.json
+
+# dry run — see exactly what would be rated, nothing is sent
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --dry-run
+
+# for real; only movies you rated 8+
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --min-rating 8
+
+# undo: clear the ratings this file set (via deleteTitleRating)
+python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --delete
+```
+
+Only `accept` rows carrying a 1–10 rating are set (`--include-flagged` also rates
+`review` rows). `rateTitle` is an upsert, so re-running is safe. Filters
+`--min-rating N`, `--only-positive`, `--limit N` apply as elsewhere.
+
+> **Review first.** A Kinopoisk `ratings.json` export has no original title, so
+> its matches resolve mostly to `review` — eyeball them before rating, since a
+> wrong rating has to be undone one title at a time (that's what `--delete` is
+> for).
+
+#### Mark titles watched — `imdb.watched`
+
+To reflect what you've **watched** (e.g. a Kinopoisk "watched" content list),
+`imdb.watched` marks each resolved title watched via `addWatchedTitle`:
+
+```bash
+python -m imdb.watched --from-matches matches.json --dry-run
+python -m imdb.watched --from-matches matches.json                 # mark watched
+python -m imdb.watched --from-matches matches.json --unwatch       # undo
+```
+
+Filters `--min-rating N`, `--only-positive`, `--limit N` and `--include-flagged`
+apply as elsewhere. **Rating a title already marks it watched**, so if you ran
+`imdb.ratings` those are covered — `imdb.watched` is for titles you watched but
+didn't rate. (Adding to a list anyway? `imdb.lists --mark-watched` does both in
+one pass.)
+
 ## Environment variables
 
 | Variable | Purpose |
@@ -417,7 +423,7 @@ Pass `--no-transliterate` to turn this off (Cyrillic-only names then stay
 | `KINOPOISK_COOKIE` | cookie string (overrides the browser pull) |
 | `KINOPOISK_USER` | user id for `kinopoisk.ratings` (overrides auto‑detect) |
 | `KINOPOISK_UA` | custom `User-Agent` |
-| `IMDB_COOKIE` | IMDb cookie string for `imdb.lists` (overrides the browser pull) |
+| `IMDB_COOKIE` | IMDb cookie string for the apply steps (overrides the browser pull) |
 | `IMDB_LIST_ID` | default target list id for `imdb.lists` (used when `--list-id` is omitted) |
 | `IMDB_UA` | custom `User-Agent` for IMDb requests |
 
@@ -440,9 +446,10 @@ rate‑limits its requests, and does not solve or circumvent captchas. Exported
 data stays local — the `out/` directory is git‑ignored and never published.
 
 **IMDb (import).** It uses IMDb's public suggestion API to look up titles and its
-GraphQL API to add titles to **your own** list, authenticated with your own
-browser cookies. Use is strictly personal and non‑commercial; IMDb data retrieved
-this way is not redistributed and is used only to build your own list.
+GraphQL API to add titles to **your own** list, rate them, or mark them watched,
+authenticated with your own browser cookies. Use is strictly personal and
+non‑commercial; IMDb data retrieved this way is not redistributed and is used only
+to build your own list.
 
 Use it in accordance with Kinopoisk's / Yandex's and IMDb's / Amazon's Terms of
 Service and applicable law; automated access may be restricted and could lead to
