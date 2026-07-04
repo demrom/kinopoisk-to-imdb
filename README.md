@@ -198,9 +198,9 @@ python -m imdb.search \
     out/kinopoisk/content-lists/12345678-my-list.json \
     -o out/imdb/from-kinopoisk/content-lists/12345678-my-list.json
 
-# 2. review: open the file (and the <out>.review.json worklist) and fix any
-#    `review` / `unmatched` rows — set decision to accept/reject, or paste the
-#    right imdb_const into an unmatched row and set decision=accept.
+# 2. review: open the file — `review` / `unmatched` rows are sorted to the top —
+#    and fix them: set decision to accept/reject, or paste the right imdb_const
+#    into an unmatched row and set decision=accept.
 
 # 3. dry run against your list, then import for real (ls… is from the list URL)
 python -m imdb.lists \
@@ -235,11 +235,15 @@ origin obvious. Every row gets an auto‑filled **`decision`**:
 | `review` | something looks off (title didn't really match, year off, or a close alternative exists) — skipped until you decide |
 | `unmatched` | nothing found — fix `imdb_const` by hand or drop the row |
 
-`review` / `unmatched` rows are also written to a focused `<out>.review.json`
-worklist. Each match records **why** it was flagged (`review`), a `title_score`
-(how well the title matched), the resolved `imdb_const` / `imdb_title` /
-`imdb_year`, and a few `alternatives`. Open the file and change `review` →
-`accept` (or `reject`) where needed.
+`review` / `unmatched` rows are **sorted to the top** of the output file, so you
+review them in place — no separate file to reconcile. Each match records **why**
+it was flagged (`review`), a `title_score` (how well the title matched), the
+resolved `imdb_const` / `imdb_title` / `imdb_year`, and a few `alternatives`.
+Open the file and change `review` → `accept` (or `reject`) where needed, then
+hand the same file to `imdb.lists`.
+
+Prefer a separate filtered worklist? Pass `--review-file` (or `--review-out
+<path>`) to also write just those rows to `<out>.review.<ext>`.
 
 Matching prefers the **original title**, then the localized one, and scores by
 title similarity + year + movie/series kind — so e.g. *House of Cards* resolves
