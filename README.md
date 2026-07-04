@@ -131,6 +131,11 @@ Each type (Актёры, Актрисы, Режиссёры, favourites, …) is
 `out/kinopoisk/stars/<id>-<slug>.json`, one person per record: `kp_id`, `name`,
 `original_name`, `url`, `birth_date`, `photo`.
 
+These are **people**, so resolve them to IMDb name pages (`nm…`) with
+`imdb.search --entity person` (see [Resolve people](#resolve-people-to-imdb-nm)),
+not to titles. IMDb indexes names by their original (Latin) spelling, so a person
+with only a Cyrillic `name` and no `original_name` may come back `unmatched`.
+
 ### Offline (no network, no cookies)
 
 Already saved a listing page from the browser? Parse it directly:
@@ -283,7 +288,30 @@ python -m imdb.search items.json --const-field imdb_id
 
 Keys: `--search-fields` (priority list of fields to search by), `--year-field`,
 `--kind-field`, `--const-field`, `--id-field`, `--rating-field`,
-`--sentiment-field`, `--series-values`.
+`--sentiment-field`, `--series-values`, `--entity`.
+
+### Resolve people to IMDb (nm…)
+
+By default `imdb.search` resolves records to **titles** (`tt…`). Pass
+`--entity person` to resolve **people** to IMDb name pages (`nm…`) instead — it
+searches by name and scores on name similarity (year/kind don't apply). In this
+mode `--search-fields` defaults to `original_name,name`, so a Kinopoisk stars
+export works out of the box:
+
+```bash
+python -m imdb.search out/kinopoisk/stars/2-актёры.json --entity person \
+    -o out/imdb/from-kinopoisk/stars/2-актёры.json
+
+# one-off lookup
+python -m imdb.search --query "Leonardo DiCaprio" --entity person
+```
+
+The output is the same reviewable matches file as for titles (`decision` /
+`review` / `unmatched`, plus `imdb_const` holding the `nm…`). IMDb indexes names
+by their original (Latin) spelling: people whose only name is Cyrillic (no
+`original_name`) tend to land in `unmatched` — fix `imdb_const` by hand or drop
+the row. Note that IMDb lists hold titles, so `imdb.lists` is for `tt…` matches,
+not resolved people.
 
 ## Environment variables
 

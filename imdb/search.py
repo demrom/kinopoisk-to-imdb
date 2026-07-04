@@ -33,8 +33,13 @@ Examples:
     # records that already carry an IMDb id under "imdb_id": trust it, skip search
     python -m imdb.search items.json --const-field imdb_id
 
-    # ad-hoc: just search one title and print the hits
+    # people instead of titles: resolve a Kinopoisk stars export to nm... consts
+    python -m imdb.search out/kinopoisk/stars/2-актёры.json --entity person \\
+        -o out/imdb/from-kinopoisk/stars/2-актёры.json
+
+    # ad-hoc: just search one title (or a person, with --entity person)
     python -m imdb.search --query "The Batman"
+    python -m imdb.search --query "Leonardo DiCaprio" --entity person
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from .core import (
     make_session,
     resolve_records,
     save_matches,
+    search_people,
     search_titles,
 )
 
@@ -98,8 +104,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Debug mode: one ad-hoc search, print hits, done.
     if args.query:
-        for t in search_titles(session, args.query):
-            print(f"{t.const}  {t.title} ({t.year})  {t.category}  — {t.stars or ''}")
+        finder = search_people if args.entity == "person" else search_titles
+        for t in finder(session, args.query):
+            year = f" ({t.year})" if t.year else ""
+            cat = f"  {t.category}" if t.category else ""
+            print(f"{t.const}  {t.title}{year}{cat}  — {t.stars or ''}")
         return 0
 
     if not args.records:

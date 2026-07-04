@@ -103,7 +103,13 @@ YEAR_RE = re.compile(r"(\d{4})")
 # --------------------------------------------------------------------------- #
 @dataclass
 class ImdbTitle:
-    """One title hit from the suggestion API (names/videos are filtered out)."""
+    """One hit from the suggestion API — a title (tt...) or, when searching
+    people, a name (nm...).
+
+    Same shape either way: `title` holds the label (the title, or the person's
+    name), `stars` the top-billed cast or the person's known-for credit. For
+    names the API sends no year/kind/category, so those stay None.
+    """
 
     const: str  # tt...
     title: str | None = None
@@ -215,6 +221,11 @@ class FieldMap:
     sentiment: str | None = "user_rating_sentiment"
     id: str | None = "kp_id"
     series_values: set[str] = field(default_factory=lambda: set(SERIES_KIND_VALUES))
+    entity: str = "title"  # "title" -> resolve to tt...; "person" -> resolve to nm...
+
+    @property
+    def is_person(self) -> bool:
+        return self.entity == "person"
 
     def titles(self, record: dict) -> list[str]:
         """Non-empty search values from `record`, in configured order, deduped."""
@@ -381,13 +392,25 @@ def suggest(
     raise RuntimeError(f"suggestion failed for {q!r}: {last_err}")
 
 
-def search_titles(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
-    """suggest() filtered to titles (id starts with 'tt')."""
+def _search_by_prefix(
+        session: requests.Session, query: str, prefix: str, **kw
+) -> list[ImdbTitle]:
+    """suggest() filtered to entries whose const starts with `prefix`."""
     return [
         ImdbTitle.from_suggestion(e)
         for e in suggest(session, query, **kw)
-        if str(e.get("id", "")).startswith("tt")
+        if str(e.get("id", "")).startswith(prefix)
     ]
+
+
+def search_titles(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
+    """suggest() filtered to titles (id starts with 'tt')."""
+    return _search_by_prefix(session, query, "tt", **kw)
+
+
+def search_people(session: requests.Session, query: str, **kw) -> list[ImdbTitle]:
+    """suggest() filtered to names/people (id starts with 'nm')."""
+    return _search_by_prefix(session, query, "nm", **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -451,19 +474,26 @@ def resolve_const(
         year: str | int | None = None,
         want_series: bool | None = None,
         pause: float = 0.5,
+        search_fn=search_titles,
+        noun: str = "title",
 ) -> Match:
-    """Resolve a list of candidate titles to the best IMDb const.
+    """Resolve a list of candidate strings to the best IMDb const.
 
     `titles` is a priority list of search strings (e.g. original title first,
     then a localized title). Searches by each in turn, merges candidates, scores
     them by title/year/kind, picks the best and records close runners-up. Only
     fills the imdb_* / query_used / score fields; callers own the src_* fields.
+
+    `search_fn` selects what to resolve to: `search_titles` (tt..., the default)
+    or `search_people` (nm...); `noun` just labels errors/review notes to match.
+    Resolving people passes no year/kind, so scoring falls back to name
+    similarity alone.
     """
     m = Match()
     want_year = _parse_year(year)
     wanted_titles = [t for t in titles if t]
     if not wanted_titles:
-        m.error = "no title to search by"
+        m.error = f"no {noun} to search by"
         return m
 
     # Query order as given: original title first (IMDb is indexed by
@@ -478,7 +508,7 @@ def resolve_const(
         for i, q in enumerate(queries):
             if i:
                 time.sleep(pause)
-            for cand in search_titles(session, q):
+            for cand in search_fn(session, q):
                 if not cand.const:
                     continue
                 s = score_candidate(
@@ -498,7 +528,7 @@ def resolve_const(
         return m
 
     if not scored:
-        m.error = "no IMDb title found"
+        m.error = f"no IMDb {noun} found"
         return m
 
     ranked = sorted(scored.values(), key=lambda v: (-v[0], (v[1].rank or 10**9)))
@@ -525,7 +555,7 @@ def resolve_const(
     # Spell out anything that looks off, so a human can eyeball the right rows.
     reasons: list[str] = []
     if title_score < 0.5:
-        reasons.append("title differs from source")
+        reasons.append(f"{noun} differs from source")
     if want_year and best.year is not None:
         diff = abs(best.year - want_year)
         if diff > 1:
@@ -706,6 +736,8 @@ def resolve_record(
         year=year_val,
         want_series=fm.want_series(record),
         pause=pause,
+        search_fn=search_people if fm.is_person else search_titles,
+        noun="name" if fm.is_person else "title",
     )
     # Graft the resolved bits onto our source-populated Match.
     m.imdb_const = res.imdb_const
@@ -857,9 +889,15 @@ def add_field_map_args(parser) -> None:
     d = FieldMap()
     g = parser.add_argument_group("field mapping (which JSON keys to use)")
     g.add_argument(
+        "--entity", choices=["title", "person"], default="title",
+        help="what to resolve records to: 'title' -> tt... (default), or "
+             "'person' -> nm... (searches by name, defaults --search-fields to "
+             "original_name,name and ignores year/kind)",
+    )
+    g.add_argument(
         "--search-fields", metavar="F,F",
         help="keys to search IMDb by, in priority order "
-             f"(default: {','.join(d.search)})",
+             f"(default: {','.join(d.search)}; person mode: original_name,name)",
     )
     g.add_argument("--year-field", metavar="F",
                    help=f"key holding the year, for disambiguation (default: {d.year})")
@@ -893,17 +931,26 @@ def _picked(value: str | None, default: str | None) -> str | None:
 def field_map_from_args(args) -> FieldMap:
     """Build a FieldMap from the flags added by add_field_map_args."""
     d = FieldMap()
-    search = _split(args.search_fields) if args.search_fields else list(d.search)
+    entity = getattr(args, "entity", "title")
+    person = entity == "person"
+    # People resolve to nm... by name; year/kind don't apply (the suggestion API
+    # sends neither for names). These are overridable by the explicit flags.
+    default_search = ["original_name", "name"] if person else list(d.search)
+    default_year = None if person else d.year
+    default_kind = None if person else d.kind
+
+    search = _split(args.search_fields) if args.search_fields else default_search
     series_values = set(d.series_values)
     if args.series_values:
         series_values |= {v.lower() for v in _split(args.series_values)}
     return FieldMap(
         search=search,
-        year=_picked(args.year_field, d.year),
-        kind=_picked(args.kind_field, d.kind),
+        year=_picked(args.year_field, default_year),
+        kind=_picked(args.kind_field, default_kind),
         const=_picked(args.const_field, d.const),
         rating=_picked(args.rating_field, d.rating),
         sentiment=_picked(args.sentiment_field, d.sentiment),
         id=_picked(args.id_field, d.id),
         series_values=series_values,
+        entity=entity,
     )
