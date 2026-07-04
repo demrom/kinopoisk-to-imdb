@@ -137,7 +137,9 @@ Each type (Актёры, Актрисы, Режиссёры, favourites, …) is
 These are **people**, so resolve them to IMDb name pages (`nm…`) with
 `imdb.search --entity person` (see [Resolving people](#resolving-people-nm)), not
 to titles. IMDb indexes names by their original (Latin) spelling, so a person
-with only a Cyrillic `name` and no `original_name` may come back `unmatched`.
+with only a Cyrillic `name` and no `original_name` is looked up by an automatic
+**transliteration** and comes back flagged `review` to confirm (or `unmatched`
+if even that finds nothing).
 
 ### Offline (no network, no cookies)
 
@@ -182,7 +184,7 @@ anything touches your account.
 ```
 kinopoisk export ──▶ imdb.search ──▶ matches.json ──┬─▶ imdb.lists    (add to a list)
      (JSON)          (public API)   (+ decisions)   ├─▶ imdb.ratings  (copy your ratings)
-                                                     └─▶ imdb.watched  (mark watched)
+                                                    └─▶ imdb.watched  (mark watched)
 ```
 
 The `imdb.lists` / `imdb.ratings` / `imdb.watched` steps are **independent** —

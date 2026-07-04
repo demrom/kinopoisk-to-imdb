@@ -152,11 +152,14 @@ def eligible(m: Match, args) -> tuple[bool, str | None]:
 
     Driven by the `decision` column: accept imports, reject/unmatched skip,
     review skips unless --include-flagged. A blank decision falls back to the
-    ambiguity flag (for hand-made files without the column).
+    ambiguity flag (for hand-made files without the column). Lists hold titles,
+    so a resolved person (`nm…`) is skipped, like imdb.ratings/imdb.watched.
     """
     dec = (m.decision or "").strip().lower()
     if not m.matched:
         return False, "unmatched"
+    if not str(m.imdb_const).startswith("tt"):
+        return False, "not-a-title"
     if dec in DECISION_NO:
         return False, "rejected"
     if dec == DECISION_REVIEW and not args.include_flagged:
