@@ -222,6 +222,7 @@ class FieldMap:
     id: str | None = "kp_id"
     series_values: set[str] = field(default_factory=lambda: set(SERIES_KIND_VALUES))
     entity: str = "title"  # "title" -> resolve to tt...; "person" -> resolve to nm...
+    transliterate: bool = True  # person mode: fall back to a transliterated query
 
     @property
     def is_person(self) -> bool:
@@ -360,6 +361,42 @@ def _parse_year(value) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# Practical Cyrillic -> Latin, for names IMDb doesn't index in Cyrillic. Not a
+# strict standard (IMDb spellings vary: Sergei/Sergey, Alexey/Aleksei) — the
+# fuzzy title scorer absorbs the slack. Used only as a fallback when a record
+# has no Latin form of its own.
+_CYRILLIC_TO_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def _has_latin(text: str | None) -> bool:
+    """True if `text` already carries a Latin form worth searching IMDb by."""
+    return bool(text) and bool(_LATIN_RE.search(text))
+
+
+def transliterate(text: str | None) -> str:
+    """Best-effort Cyrillic -> Latin, preserving case and non-Cyrillic chars."""
+    if not text:
+        return ""
+    out: list[str] = []
+    for ch in text:
+        rep = _CYRILLIC_TO_LATIN.get(ch.lower())
+        if rep is None:
+            out.append(ch)  # already Latin, digits, spaces, punctuation
+        elif ch.isupper() and rep:
+            out.append(rep[0].upper() + rep[1:])
+        else:
+            out.append(rep)
+    return "".join(out)
+
+
 def suggest(
         session: requests.Session,
         query: str,
@@ -476,6 +513,7 @@ def resolve_const(
         pause: float = 0.5,
         search_fn=search_titles,
         noun: str = "title",
+        transliterate_fallback: bool = False,
 ) -> Match:
     """Resolve a list of candidate strings to the best IMDb const.
 
@@ -488,6 +526,10 @@ def resolve_const(
     or `search_people` (nm...); `noun` just labels errors/review notes to match.
     Resolving people passes no year/kind, so scoring falls back to name
     similarity alone.
+
+    `transliterate_fallback`: when no candidate string has a Latin form, add a
+    transliterated guess (IMDb doesn't index Cyrillic names). Such a match is
+    flagged for review, since the transliteration is only a best guess.
     """
     m = Match()
     want_year = _parse_year(year)
@@ -495,6 +537,17 @@ def resolve_const(
     if not wanted_titles:
         m.error = f"no {noun} to search by"
         return m
+
+    # Nothing Latin to search by? IMDb won't match Cyrillic names, so add a
+    # transliterated fallback — both as a query and as something to score the
+    # Latin candidates against (comparing Latin vs Cyrillic would score ~0).
+    used_transliteration = False
+    if transliterate_fallback and not any(_has_latin(t) for t in wanted_titles):
+        for t in list(wanted_titles):
+            tr = transliterate(t)
+            if tr and tr != t and tr not in wanted_titles:
+                wanted_titles.append(tr)
+                used_transliteration = True
 
     # Query order as given: original title first (IMDb is indexed by
     # original/English titles), fallbacks after. Dedup, preserve order.
@@ -566,6 +619,10 @@ def resolve_const(
         reasons.append("close alternative exists")
     if best_score < 0.6 and not reasons:
         reasons.append("low overall confidence")
+    # Transliteration is a guess (and can land a plausible-but-wrong namesake),
+    # so never auto-accept it — always route it through review.
+    if used_transliteration:
+        reasons.append(f"matched by transliteration ({best_query!r}) — verify")
 
     if reasons:
         m.ambiguous = True
@@ -738,6 +795,7 @@ def resolve_record(
         pause=pause,
         search_fn=search_people if fm.is_person else search_titles,
         noun="name" if fm.is_person else "title",
+        transliterate_fallback=fm.is_person and fm.transliterate,
     )
     # Graft the resolved bits onto our source-populated Match.
     m.imdb_const = res.imdb_const
@@ -895,6 +953,11 @@ def add_field_map_args(parser) -> None:
              "original_name,name and ignores year/kind)",
     )
     g.add_argument(
+        "--no-transliterate", action="store_false", dest="transliterate",
+        help="(person mode) don't add a transliterated fallback query for a "
+             "Cyrillic name that has no Latin form (default: do)",
+    )
+    g.add_argument(
         "--search-fields", metavar="F,F",
         help="keys to search IMDb by, in priority order "
              f"(default: {','.join(d.search)}; person mode: original_name,name)",
@@ -953,4 +1016,5 @@ def field_map_from_args(args) -> FieldMap:
         id=_picked(args.id_field, d.id),
         series_values=series_values,
         entity=entity,
+        transliterate=getattr(args, "transliterate", d.transliterate),
     )

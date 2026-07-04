@@ -307,11 +307,18 @@ python -m imdb.search --query "Leonardo DiCaprio" --entity person
 ```
 
 The output is the same reviewable matches file as for titles (`decision` /
-`review` / `unmatched`, plus `imdb_const` holding the `nm…`). IMDb indexes names
-by their original (Latin) spelling: people whose only name is Cyrillic (no
-`original_name`) tend to land in `unmatched` — fix `imdb_const` by hand or drop
-the row. Note that IMDb lists hold titles, so `imdb.lists` is for `tt…` matches,
-not resolved people.
+`review` / `unmatched`, plus `imdb_const` holding the `nm…`). Note that IMDb
+lists hold titles, so `imdb.lists` is for `tt…` matches, not resolved people.
+
+**Cyrillic names.** IMDb indexes names by their original (Latin) spelling, so a
+Cyrillic query alone finds nothing. When a record has no Latin form at all
+(e.g. Kinopoisk left `original_name` empty), person mode automatically adds a
+**transliterated** fallback query — `Кирилл Серебренников` → `Kirill
+Serebrennikov` → `nm1970598`. Transliteration is a best guess (IMDb spellings
+vary, and a namesake can slip in), so these matches are always flagged
+`review` with the transliterated query recorded — confirm them before importing.
+Pass `--no-transliterate` to turn this off (Cyrillic-only names then stay
+`unmatched`).
 
 ## Environment variables
 
