@@ -32,6 +32,7 @@ account:
 | `imdb.search` | resolves records to IMDb ids via the public suggestion API | no |
 | `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`) | yes |
 | `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`) | yes |
+| `imdb.watched` | marks resolved titles watched / unwatched (`addWatchedTitle`) | yes |
 
 `imdb/core.py` holds the shared bits: the session/cookies, the suggestion‑search
 client, the Kinopoisk→IMDb matcher, and the GraphQL client. See
@@ -304,6 +305,30 @@ Filters `--min-rating N`, `--only-positive`, `--limit N` apply as in `imdb.lists
 > its matches resolve mostly to `review` — eyeball them before rating, since a
 > wrong rating has to be undone one title at a time (that's what `--delete` is
 > for).
+
+### 4. Mark titles watched — `imdb.watched`
+
+To reflect what you've **watched** (e.g. a Kinopoisk "Просмотренные" list),
+`imdb.watched` marks each resolved title watched via `addWatchedTitle`. Same
+matches file, `decision` gating and cookies as above:
+
+```bash
+python -m imdb.watched --from-matches matches.json --dry-run
+python -m imdb.watched --from-matches matches.json                 # mark watched
+python -m imdb.watched --from-matches matches.json --unwatch       # undo
+```
+
+Filters `--min-rating N`, `--only-positive`, `--limit N` and `--include-flagged`
+apply as elsewhere. **Rating a title already marks it watched**, so if you ran
+`imdb.ratings` those are covered — `imdb.watched` is for titles you watched but
+didn't rate.
+
+If you're adding to a list anyway, `imdb.lists --mark-watched` does both in one
+pass (add to the list **and** mark watched):
+
+```bash
+python -m imdb.lists --from-matches matches.json --list-id ls123456789 --mark-watched
+```
 
 ### Any JSON, not just Kinopoisk
 

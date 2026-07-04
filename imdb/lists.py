@@ -47,6 +47,7 @@ from .core import (
     load_matches,
     load_records,
     make_session,
+    mark_watched,
     resolve_cookie,
     resolve_records,
 )
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dry-run", action="store_true",
         help="show what would be added without touching IMDb",
+    )
+    p.add_argument(
+        "--mark-watched", action="store_true",
+        help="also mark each added title as watched (addWatchedTitle). Rating a "
+             "title already marks it watched, so this is for unrated ones.",
     )
 
     # Which resolved rows to actually add.
@@ -219,23 +225,28 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     added = dupes = failed = 0
+    watched_ok = watched_failed = 0
     report: list[dict] = []
     total = len(to_add)
     for i, m in enumerate(to_add, 1):
         label = _label(m)
         if args.dry_run:
             mark = "?" if m.ambiguous else " "
-            print(f"[{i}/{total}] {mark} would add {label}", file=sys.stderr)
+            extra = " (+ mark watched)" if args.mark_watched else ""
+            print(f"[{i}/{total}] {mark} would add {label}{extra}", file=sys.stderr)
             report.append({"const": m.imdb_const, "outcome": "dry-run", "title": m.imdb_title})
             continue
+        in_list = False
         try:
             add_to_list(session, list_id, m.imdb_const)
             added += 1
+            in_list = True
             outcome = "added"
             print(f"[{i}/{total}] + {label}", file=sys.stderr)
         except Exception as err:  # noqa: BLE001 — one item must not kill the run
             if _is_duplicate(str(err)):
                 dupes += 1
+                in_list = True
                 outcome = "duplicate"
                 print(f"[{i}/{total}] = already in list: {label}", file=sys.stderr)
             else:
@@ -247,6 +258,21 @@ def main(argv: list[str] | None = None) -> int:
                     print("Aborting: not authenticated (bad/expired cookies).", file=sys.stderr)
                     report.append({"const": m.imdb_const, "outcome": outcome, "title": m.imdb_title})
                     break
+        # Optionally mark the title watched too. Best-effort: the add already
+        # counted, so a watched hiccup notes but doesn't fail the item.
+        if args.mark_watched and in_list:
+            try:
+                res = mark_watched(session, m.imdb_const)
+                if res.get("success") is False:
+                    raise RuntimeError(
+                        (res.get("message") or {}).get("value") or "not successful"
+                    )
+                watched_ok += 1
+                outcome += "+watched"
+                print(f"          ↳ watched", file=sys.stderr)
+            except Exception as werr:  # noqa: BLE001 — watched is a best-effort add-on
+                watched_failed += 1
+                print(f"          ↳ watched failed: {werr}", file=sys.stderr)
         report.append({"const": m.imdb_const, "outcome": outcome, "title": m.imdb_title})
         if i < total:
             time.sleep(args.pause)
@@ -260,13 +286,16 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.dry_run:
-        print(f"Dry run: {total} would be added.", file=sys.stderr)
+        note = " (+ mark watched)" if args.mark_watched else ""
+        print(f"Dry run: {total} would be added{note}.", file=sys.stderr)
     else:
-        print(
+        line = (
             f"Done: {added} added, {dupes} already there, {failed} failed "
-            f"(of {total}).",
-            file=sys.stderr,
+            f"(of {total})."
         )
+        if args.mark_watched:
+            line += f" Watched: {watched_ok} marked, {watched_failed} failed."
+        print(line, file=sys.stderr)
     return 0 if failed == 0 else 1
 
 

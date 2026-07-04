@@ -667,6 +667,37 @@ mutation DeleteTitleRating($titleId: ID!) {
 }
 """.strip()
 
+# Mark / unmark a title as watched — the same web-app operations. Note: rating a
+# title already marks it watched (rating is one "watched source"), so these are
+# mainly for titles you watched but didn't rate.
+ADD_WATCHED_MUTATION = """
+mutation AddWatchedTitle($titleId: ID!) {
+  addWatchedTitle(titleId: $titleId) {
+    message {
+      language
+      value
+    }
+    success
+  }
+}
+""".strip()
+
+REMOVE_WATCHED_MUTATION = """
+mutation RemoveWatchedTitle($titleId: ID!) {
+  removeWatchedTitle(titleId: $titleId) {
+    message {
+      language
+      value
+    }
+    remainingWatchedSourceTypes
+    remainingReview {
+      id
+    }
+    success
+  }
+}
+""".strip()
+
 
 def graphql(
         session: requests.Session,
@@ -750,6 +781,28 @@ def delete_rating(session: requests.Session, const: str) -> dict:
         operation_name="DeleteTitleRating",
     )
     return (data.get("data") or {}).get("deleteTitleRating") or {}
+
+
+def mark_watched(session: requests.Session, const: str) -> dict:
+    """Mark a title as watched. Returns {success, message, ...}."""
+    data = graphql(
+        session,
+        ADD_WATCHED_MUTATION,
+        {"titleId": const},
+        operation_name="AddWatchedTitle",
+    )
+    return (data.get("data") or {}).get("addWatchedTitle") or {}
+
+
+def unmark_watched(session: requests.Session, const: str) -> dict:
+    """Remove a title's watched mark (undo). Returns {success, message, ...}."""
+    data = graphql(
+        session,
+        REMOVE_WATCHED_MUTATION,
+        {"titleId": const},
+        operation_name="RemoveWatchedTitle",
+    )
+    return (data.get("data") or {}).get("removeWatchedTitle") or {}
 
 
 # --------------------------------------------------------------------------- #
