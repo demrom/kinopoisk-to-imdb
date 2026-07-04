@@ -90,10 +90,28 @@ GRAPHQL_HEADERS = {
     "X-Imdb-User-Language": "en-US",
 }
 
-# IMDb title-type ids (the "qid" field in suggestion results), split into
-# series-like vs movie-like, so we can prefer the same kind Kinopoisk had.
-SERIES_QIDS = {"tvSeries", "tvMiniSeries", "tvSpecial", "tvShort", "podcastSeries"}
-MOVIE_QIDS = {"movie", "tvMovie", "short", "video", "musicVideo", "videoGame"}
+# IMDb title-type ids (the "qid" field in suggestion results). We only ever want
+# a Kinopoisk film/series to resolve to a *canonical* title: an actual movie or
+# series. Everything else the suggestion API returns for a `tt` const — video
+# games, music videos, loose clips, single episodes, podcasts — is noise that
+# must never win. Anime is the classic trap: IMDb indexes the series under its
+# English title while a tie-in *game* keeps the romaji title, so the game matches
+# the source name better than the real series. Type is therefore a gate, not a
+# tie-breaker (see score_candidate / _kind_allowed / resolve_const).
+FILM_QIDS = {"movie", "tvMovie"}
+SERIES_QIDS = {"tvSeries", "tvMiniSeries"}
+CANONICAL_QIDS = FILM_QIDS | SERIES_QIDS
+# Non-canonical tt types: a film/series export never legitimately lands on one of
+# these, so they get a hard penalty and are never auto-accepted.
+NONCANONICAL_QIDS = {
+    "videoGame", "musicVideo", "video", "short", "tvShort", "tvSpecial",
+    "tvEpisode", "podcastSeries", "podcastEpisode",
+}
+
+# Score adjustments for the kind gate (subtracted/added in score_candidate).
+KIND_MATCH_BONUS = 0.06     # candidate is the wanted bucket (film vs series)
+WRONG_BUCKET_PENALTY = 0.30 # canonical, but the opposite bucket (movie<->series)
+NONCANONICAL_PENALTY = 0.60 # a game/clip/episode/podcast — almost certainly wrong
 
 YEAR_RE = re.compile(r"(\d{4})")
 
@@ -467,6 +485,92 @@ def _title_sim(candidate: str | None, wanted: list[str]) -> float:
     return best
 
 
+def _kind_allowed(kind: str | None, want_series: bool | None) -> bool | None:
+    """Is a candidate's IMDb type acceptable for what we're matching?
+
+    Returns True when the type is canonical and fits the wanted bucket (or the
+    bucket is unknown), False when it's non-canonical (game/clip/episode/podcast)
+    or the opposite bucket (a movie where a series was wanted, or vice versa), and
+    None when the candidate carries no type at all (e.g. a person/name result, so
+    no gate applies). resolve_const turns a False here into a forced review.
+    """
+    if not kind:
+        return None
+    if kind in NONCANONICAL_QIDS:
+        return False
+    if kind not in CANONICAL_QIDS:
+        return None  # unknown/new type: no signal either way
+    if want_series is None:
+        return True  # canonical and we have no bucket preference
+    return kind in SERIES_QIDS if want_series else kind in FILM_QIDS
+
+
+# Sequel / season / part markers: these distinguish entries in a franchise
+# ("Ghost in the Shell 2", "Part II", season "3") and must match exactly — a
+# candidate that adds or changes one is a different entry, not a better spelling.
+_ROMAN_RE = re.compile(r"^(?:x{0,3})(?:ix|iv|v?i{0,3})$")
+
+
+def _markers(tokens: list[str]) -> set[str]:
+    """Digits and roman numerals in a token list (sequel/season/part markers)."""
+    out: set[str] = set()
+    for t in tokens:
+        if t.isdigit():
+            out.add(t)
+        elif t != "i" and _ROMAN_RE.fullmatch(t):  # bare "i" is too often a word
+            out.add(t)
+    return out
+
+
+# Words that carry no distinguishing weight — ignored when looking for the
+# "extra" subtitle tokens that mark a spin-off / sequel ("Dead Apple", "Reverie").
+_TITLE_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with",
+    "no", "wa", "ga", "de", "e", "la", "le", "el", "los", "las", "der", "die",
+    "das", "und", "part", "season", "movie", "film", "the movie",
+}
+
+
+def _title_penalty(cand_title: str | None, wanted: list[str]) -> float:
+    """Penalty for a candidate that shares a base with the source but adds its
+    own distinctive tokens — the signal difflib's ratio is too soft on.
+
+    SequenceMatcher.ratio() rewards a shared prefix, so "Bungo Stray Dogs: Dead
+    Apple" scores high against "Bungo Stray Dogs" and "Bleu 2" against "Bleu".
+    We take the *best* (lowest-penalty) reading across all wanted strings, then:
+
+      * mismatched sequel markers (digits / roman numerals) -> flat penalty, even
+        for a low base similarity ("2" vs "" or "II" vs "III");
+      * distinctive subtitle words the source lacks -> graded penalty, but only
+        when the two clearly share a base (high ratio), so a pure translation
+        (romaji source vs long English title) is never punished as a "subtitle".
+    """
+    cand = _norm(cand_title)
+    if not cand:
+        return 0.0
+    ctoks = cand.split()
+    cmarkers = _markers(ctoks)
+    best_pen = 1.0
+    for w in wanted:
+        nw = _norm(w)
+        if not nw:
+            continue
+        wtoks = nw.split()
+        ratio = difflib.SequenceMatcher(None, cand, nw).ratio()
+        pen = 0.0
+        if cmarkers != _markers(wtoks):
+            pen += 0.20
+        if ratio >= 0.6:
+            extra = [
+                t for t in ctoks
+                if t not in wtoks and not t.isdigit() and t not in _TITLE_STOPWORDS
+            ]
+            if extra:
+                pen += min(0.25, 0.10 * len(extra))
+        best_pen = min(best_pen, pen)
+    return best_pen if best_pen < 1.0 else 0.0
+
+
 def score_candidate(
         cand: ImdbTitle,
         *,
@@ -476,6 +580,10 @@ def score_candidate(
 ) -> float:
     """Confidence that `cand` is the right title, roughly 0..1."""
     score = _title_sim(cand.title, wanted_titles)
+
+    # A candidate that shares a base with the source but adds a subtitle or a
+    # different sequel marker (spin-off / sequel / other season) is demoted.
+    score -= _title_penalty(cand.title, wanted_titles)
 
     # Year agreement is a strong signal (foreign titles collide a lot).
     if want_year and cand.year:
@@ -489,14 +597,16 @@ def score_candidate(
         else:
             score -= 0.15
 
-    # Kind agreement (movie vs series).
-    if want_series is not None and cand.kind:
-        is_series = cand.kind in SERIES_QIDS
-        is_movie = cand.kind in MOVIE_QIDS
-        if (want_series and is_series) or (not want_series and is_movie):
-            score += 0.06
-        elif is_series or is_movie:
-            score -= 0.08
+    # Type is a gate, not a tie-breaker: a wrong content type must never out-rank
+    # the right one on the strength of a matching year. Non-canonical types
+    # (games, music videos, episodes, podcasts) are pushed well below any
+    # plausible real match; the opposite bucket (movie<->series) is demoted hard
+    # enough that a single matching year can't recover it.
+    if cand.kind in NONCANONICAL_QIDS:
+        score -= NONCANONICAL_PENALTY
+    elif want_series is not None and cand.kind in CANONICAL_QIDS:
+        right_bucket = cand.kind in SERIES_QIDS if want_series else cand.kind in FILM_QIDS
+        score += KIND_MATCH_BONUS if right_bucket else -WRONG_BUCKET_PENALTY
 
     # Not clamped to 1.0: the year/kind bonuses must still separate two titles
     # that both match by name (e.g. the "Succession" series vs the movie), so we
@@ -573,9 +683,14 @@ def resolve_const(
                 prev = scored.get(cand.const)
                 if prev is None or s > prev[0]:
                     scored[cand.const] = (s, cand, q)
-            # Good enough on the original title? Don't bother with the fallback.
-            if scored and max(v[0] for v in scored.values()) >= 0.85:
-                break
+            # Good enough on the original title? Don't bother with the fallback —
+            # but only bail early when the leader is a type we'd actually accept,
+            # so a high-title-sim game/short/wrong-bucket can't lock us out of the
+            # fallback query that would surface the real title.
+            if scored:
+                lead = max(scored.values(), key=lambda v: v[0])
+                if lead[0] >= 0.85 and _kind_allowed(lead[1].kind, want_series) is not False:
+                    break
     except Exception as err:  # noqa: BLE001 — one movie must not kill the run
         m.error = str(err)
         return m
@@ -606,9 +721,19 @@ def resolve_const(
     ]
 
     # Spell out anything that looks off, so a human can eyeball the right rows.
+    kind_ok = _kind_allowed(best.kind, want_series)
+    exact_year = want_year is not None and best.year == want_year
     reasons: list[str] = []
+    # Type is a hard gate: a non-canonical (game/clip/episode) or opposite-bucket
+    # match never auto-accepts, whatever its score.
+    if kind_ok is False:
+        reasons.append(f"unexpected type ({best.kind or '?'})")
     if title_score < 0.5:
         reasons.append(f"{noun} differs from source")
+    elif title_score < 0.6 and not (exact_year and kind_ok):
+        # A weak title match must not ride on the year alone; only a strong title,
+        # or an exact-year hit of the right type, is allowed through unattended.
+        reasons.append(f"weak {noun} match (title_score {title_score:.2f})")
     if want_year and best.year is not None:
         diff = abs(best.year - want_year)
         if diff > 1:
@@ -908,6 +1033,37 @@ def resolve_record(
     return m
 
 
+def _flag_duplicate_consts(matches: list[Match]) -> int:
+    """Flag rows that collide on a const: if one IMDb id was handed to two or more
+    *different* source titles, at least one match is wrong. A cheap cross-row
+    pass that catches near-name collisions a per-row scorer can't see (e.g. two
+    sibling entries in a franchise both resolving to the same const). Returns how
+    many rows it moved to review.
+
+    Rows carrying the same source title (genuine duplicate input) don't count —
+    only distinct titles sharing a const are suspicious.
+    """
+    by_const: dict[str, list[Match]] = {}
+    for m in matches:
+        if m.imdb_const:
+            by_const.setdefault(m.imdb_const, []).append(m)
+
+    moved = 0
+    for group in by_const.values():
+        if len(group) < 2:
+            continue
+        if len({_norm(m.src_title) for m in group}) < 2:
+            continue  # same source title repeated — not a collision
+        for m in group:
+            note = "duplicate const — the same IMDb id matched another title"
+            m.review = f"{m.review}; {note}" if m.review else note
+            m.ambiguous = True
+            if m.decision == DECISION_ACCEPT:
+                m.decision = DECISION_REVIEW
+                moved += 1
+    return moved
+
+
 def resolve_records(
         session: requests.Session,
         records: list[dict],
@@ -936,6 +1092,14 @@ def resolve_records(
         # A trusted const needs no request, so no need to pause after it.
         if i < total and res.query_used != "(provided)":
             time.sleep(pause)
+
+    # Cross-row pass: one const on two different titles means a wrong match.
+    dupes = _flag_duplicate_consts(matches)
+    if dupes:
+        print(
+            f"Flagged {dupes} row(s) for review: duplicate const across titles",
+            file=sys.stderr,
+        )
     return matches
 
 
