@@ -50,6 +50,9 @@ import sys
 from pathlib import Path
 
 from .core import (
+    DECISION_REVIEW,
+    DECISION_UNMATCHED,
+    _is_latin_form,
     add_field_map_args,
     field_map_from_args,
     load_records,
@@ -58,6 +61,7 @@ from .core import (
     save_matches,
     search_people,
     search_titles,
+    transliterate,
 )
 
 
@@ -107,7 +111,19 @@ def main(argv: list[str] | None = None) -> int:
     # Debug mode: one ad-hoc search, print hits, done.
     if args.query:
         finder = search_people if args.entity == "person" else search_titles
-        for t in finder(session, args.query):
+        hits = finder(session, args.query)
+        # Mirror resolve_const: a Cyrillic-only person query finds nothing on IMDb
+        # (names are indexed by their Latin form), so fall back to a transliterated
+        # query — this is the command the docs suggest for verifying namesakes.
+        if (
+            not hits and args.entity == "person" and args.transliterate
+            and not _is_latin_form(args.query)
+        ):
+            tr = transliterate(args.query)
+            if tr and tr != args.query:
+                print(f"# no hits for {args.query!r}; trying '{tr}'", file=sys.stderr)
+                hits = finder(session, tr)
+        for t in hits:
             year = f" ({t.year})" if t.year else ""
             cat = f"  {t.category}" if t.category else ""
             print(f"{t.const}  {t.title}{year}{cat}  — {t.stars or ''}")
@@ -133,9 +149,12 @@ def main(argv: list[str] | None = None) -> int:
     matches = resolve_records(session, records, field_map, pause=args.pause)
 
     # Sort the rows that need a human call (review/unmatched) to the top, so the
-    # file opens review-ready — no separate worklist to reconcile. Stable, so the
+    # file opens review-ready — no separate worklist to reconcile. Settled rows
+    # (accept, and a human-edited reject) sink to the bottom. Stable, so the
     # original order is preserved within each group.
-    matches.sort(key=lambda m: 0 if (m.decision or "") != "accept" else 1)
+    matches.sort(
+        key=lambda m: 0 if (m.decision or "") in (DECISION_REVIEW, DECISION_UNMATCHED) else 1
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

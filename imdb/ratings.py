@@ -156,7 +156,9 @@ def eligible(m: Match, args) -> tuple[bool, str | None]:
 
     Driven by the `decision` column, like imdb.lists: accept rates, reject/
     unmatched skip, review skips unless --include-flagged. Ratings apply to
-    titles only (tt...), and (unless --delete) the row must carry a 1..10 rating.
+    titles only (tt...), and the row must carry a 1..10 rating — `--delete` only
+    clears ratings this file would set, so it skips no-rating rows too (undoing
+    nothing there, and never touching a rating the user set some other way).
     """
     dec = (m.decision or "").strip().lower()
     if not m.matched:
@@ -169,7 +171,7 @@ def eligible(m: Match, args) -> tuple[bool, str | None]:
         return False, "review"
     if not dec and m.ambiguous and not args.include_flagged:
         return False, "review"
-    if not args.delete and _rating_value(m) is None:
+    if _rating_value(m) is None:
         return False, "no-rating"
     if args.min_rating is not None and (m.src_rating or 0) < args.min_rating:
         return False, f"rating<{args.min_rating}"
@@ -258,7 +260,8 @@ def main(argv: list[str] | None = None) -> int:
             # An auth failure dooms every remaining item — stop early.
             if "Authentication required" in str(err) or "FORBIDDEN" in str(err):
                 print("Aborting: not authenticated (bad/expired cookies).", file=sys.stderr)
-                report.append({"const": m.imdb_const, "outcome": outcome})
+                report.append({"const": m.imdb_const, "outcome": outcome,
+                               "rating": None if args.delete else rating})
                 break
         report.append({"const": m.imdb_const, "outcome": outcome,
                        "rating": None if args.delete else rating})

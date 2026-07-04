@@ -263,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.mark_watched and in_list:
             try:
                 res = mark_watched(session, m.imdb_const)
-                if res.get("success") is False:
+                # A missing/false `success` (incl. a null result) is a failure.
+                if not res.get("success"):
                     raise RuntimeError(
                         (res.get("message") or {}).get("value") or "not successful"
                     )

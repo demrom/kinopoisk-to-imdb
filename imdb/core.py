@@ -392,11 +392,20 @@ _CYRILLIC_TO_LATIN = {
 }
 
 _LATIN_RE = re.compile(r"[A-Za-z]")
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 def _has_latin(text: str | None) -> bool:
     """True if `text` already carries a Latin form worth searching IMDb by."""
     return bool(text) and bool(_LATIN_RE.search(text))
+
+
+def _is_latin_form(text: str | None) -> bool:
+    """True if `text` is a clean Latin search form — has Latin letters and no
+    Cyrillic. A mixed string like "Иван IV" is *not* one: the Latin part ("IV")
+    isn't a searchable name, so such a record still needs a transliterated query.
+    """
+    return _has_latin(text) and not (text and _CYRILLIC_RE.search(text))
 
 
 def transliterate(text: str | None) -> str:
@@ -561,9 +570,12 @@ def _title_penalty(cand_title: str | None, wanted: list[str]) -> float:
         if cmarkers != _markers(wtoks):
             pen += 0.20
         if ratio >= 0.6:
+            # Exclude sequel/season markers (digits *and* roman numerals) — they
+            # already drew the flat penalty above, so counting them again here
+            # would demote a roman-numbered sequel harder than a digit one.
             extra = [
                 t for t in ctoks
-                if t not in wtoks and not t.isdigit() and t not in _TITLE_STOPWORDS
+                if t not in wtoks and t not in cmarkers and t not in _TITLE_STOPWORDS
             ]
             if extra:
                 pen += min(0.25, 0.10 * len(extra))
@@ -648,11 +660,13 @@ def resolve_const(
         m.error = f"no {noun} to search by"
         return m
 
-    # Nothing Latin to search by? IMDb won't match Cyrillic names, so add a
+    # No clean Latin form to search by? IMDb won't match Cyrillic names, so add a
     # transliterated fallback — both as a query and as something to score the
-    # Latin candidates against (comparing Latin vs Cyrillic would score ~0).
+    # Latin candidates against (comparing Latin vs Cyrillic would score ~0). A
+    # partly-Latin string (e.g. "Иван IV") still needs one: its Latin part isn't
+    # a searchable name.
     used_transliteration = False
-    if transliterate_fallback and not any(_has_latin(t) for t in wanted_titles):
+    if transliterate_fallback and not any(_is_latin_form(t) for t in wanted_titles):
         for t in list(wanted_titles):
             tr = transliterate(t)
             if tr and tr != t and tr not in wanted_titles:

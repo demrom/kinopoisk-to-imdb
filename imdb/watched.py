@@ -222,12 +222,19 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             res = action(session, m.imdb_const)
-            # These mutations report success in the body rather than raising.
-            if res.get("success") is False:
+            # These mutations report success in the body rather than raising, so
+            # a missing/false `success` (incl. a null result) is a failure.
+            if not res.get("success"):
                 msg = ((res.get("message") or {}).get("value")) or "not successful"
                 failed += 1
                 outcome = f"error: {msg}"
                 print(f"[{i}/{total}] x FAILED {label}: {msg}", file=sys.stderr)
+                # An auth failure surfaced in the body (not as an exception) dooms
+                # every remaining item — stop early, like the except branch below.
+                if "Authentication required" in msg or "FORBIDDEN" in msg:
+                    print("Aborting: not authenticated (bad/expired cookies).", file=sys.stderr)
+                    report.append({"const": m.imdb_const, "outcome": outcome})
+                    break
             else:
                 done += 1
                 outcome = "unwatched" if args.unwatch else "watched"
