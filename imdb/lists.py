@@ -41,6 +41,7 @@ from .core import (
     DECISION_REVIEW,
     LIST_ENV,
     Match,
+    add_cookie_args,
     add_field_map_args,
     add_to_list,
     field_map_from_args,
@@ -56,20 +57,6 @@ from .core import (
 def _is_duplicate(err: str) -> bool:
     low = err.lower()
     return any(w in low for w in ("already", "duplicate", "exists"))
-
-
-def add_cookie_args(parser: argparse.ArgumentParser) -> None:
-    """Cookie-source flags (mirrors kinopoisk.core.add_http_args)."""
-    parser.add_argument("--cookie", help="IMDb Cookie string from the browser")
-    parser.add_argument("--cookie-file", help="file with the IMDb Cookie string")
-    parser.add_argument(
-        "--browser", action="append", dest="browsers", metavar="NAME",
-        help="browser to read cookies from (arc/chrome/...); repeatable",
-    )
-    parser.add_argument(
-        "--no-browser-cookie", action="store_true",
-        help="do not auto-pull cookies from the browser",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:

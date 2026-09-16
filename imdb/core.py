@@ -11,7 +11,8 @@ Holds everything both steps need:
   * data models (ImdbTitle for a search hit, Match for a resolved Kinopoisk
     movie);
   * the suggestion-search client and the Kinopoisk->IMDb matching logic;
-  * the GraphQL client and the AddConstToList mutation;
+  * the GraphQL client: the mutations that write to your account, and the query
+    that reads one of your lists back out (imdb.export);
   * loading a Kinopoisk export and saving the resolved matches.
 
 Only imdb.lists needs cookies (it mutates your list). imdb.search talks to the
@@ -944,6 +945,153 @@ def unmark_watched(session: requests.Session, const: str) -> dict:
     return (data.get("data") or {}).get("removeWatchedTitle") or {}
 
 
+# Read one of your lists: its metadata plus a page of items, each carrying both
+# the title's own facts and *your* data on it (rating, watched mark) — the same
+# fields the list page renders. Private lists need the cookies, like the
+# mutations above. Paged via pageInfo.endCursor; 250 is the page size the
+# endpoint serves (validated against the live endpoint).
+LIST_ITEMS_QUERY = """
+query ExportList($id: ID!, $first: Int!, $after: ID) {
+  list(id: $id) {
+    id
+    name { originalText }
+    description { originalText { plainText } }
+    createdDate
+    lastModifiedDate
+    visibility { id }
+    items(first: $first, after: $after) {
+      total
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          itemId
+          createdDate
+          description { originalText { plainText } }
+          item {
+            __typename
+            ... on Title {
+              id
+              titleText { text }
+              originalTitleText { text }
+              titleType { id }
+              releaseYear { year endYear }
+              releaseDate { day month year }
+              runtime { seconds }
+              ratingsSummary { aggregateRating voteCount }
+              titleGenres { genres { genre { text } } }
+              principalCredits(filter: {categories: ["director"]}) {
+                credits { name { id nameText { text } } }
+              }
+              userRating { value date }
+              userWatchedStatus { isWatched firstWatched }
+            }
+            ... on Name { id nameText { text } }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+LIST_PAGE_SIZE = 250
+
+
+def fetch_list_page(
+        session: requests.Session,
+        list_id: str,
+        *,
+        first: int = LIST_PAGE_SIZE,
+        after: str | None = None,
+) -> dict:
+    """One page of a list: the `list` payload (metadata + an `items` page)."""
+    data = graphql(
+        session,
+        LIST_ITEMS_QUERY,
+        {"id": list_id, "first": first, "after": after},
+        operation_name="ExportList",
+    )
+    payload = (data.get("data") or {}).get("list")
+    if not payload:
+        raise RuntimeError(
+            f"list {list_id} not found — check the id, and that you are logged "
+            "in as its owner if it is private"
+        )
+    return payload
+
+
+def fetch_list_entries(
+        session: requests.Session,
+        list_id: str,
+        *,
+        pause: float = 0.5,
+        progress=None,
+) -> tuple[dict, list[dict]]:
+    """A whole list: its metadata (without `items`) and every item node, in list
+    order. `progress(fetched, total)` is called after each page, if given.
+    """
+    meta: dict = {}
+    nodes: list[dict] = []
+    after: str | None = None
+    while True:
+        payload = fetch_list_page(session, list_id, after=after)
+        items = payload.pop("items", None) or {}
+        meta = meta or payload
+        nodes.extend(edge.get("node") or {} for edge in items.get("edges") or [])
+        if progress:
+            progress(len(nodes), items.get("total"))
+        page_info = items.get("pageInfo")
+        if not page_info:
+            # without it "no next page" is a guess, and a wrong guess truncates
+            raise RuntimeError(f"list {list_id}: page came without pageInfo")
+        if not page_info.get("hasNextPage"):
+            meta["total"] = items.get("total")
+            return meta, nodes
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor == after:
+            # re-asking for the same page would loop forever on duplicates
+            raise RuntimeError(f"list {list_id}: next page promised without a new cursor")
+        after = cursor
+        time.sleep(pause)
+
+
+USER_LISTS_QUERY = """
+query MyLists($first: Int!) {
+  lists(filter: {}, first: $first) {
+    total
+    edges {
+      node {
+        id
+        name { originalText }
+        listType { id }
+        items(first: 1) { total }
+        lastModifiedDate
+      }
+    }
+  }
+}
+""".strip()
+
+
+def fetch_user_lists(session: requests.Session, *, first: int = 250) -> list[dict]:
+    """Your own lists: [{id, name, type, total, modified_at}], newest change first."""
+    data = graphql(
+        session, USER_LISTS_QUERY, {"first": first}, operation_name="MyLists"
+    )
+    edges = ((data.get("data") or {}).get("lists") or {}).get("edges") or []
+    out = []
+    for edge in edges:
+        node = edge.get("node") or {}
+        out.append({
+            "id": node.get("id"),
+            "name": (node.get("name") or {}).get("originalText"),
+            "type": (node.get("listType") or {}).get("id"),
+            "total": (node.get("items") or {}).get("total"),
+            "modified_at": node.get("lastModifiedDate"),
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Loading records and resolving them
 # --------------------------------------------------------------------------- #
@@ -1141,26 +1289,53 @@ def _alts_str(alts: list[dict]) -> str:
     )
 
 
+def save_rows(
+        rows: list[dict],
+        path: Path,
+        fmt: str | None = None,
+        *,
+        field_order: list[str] | None = None,
+) -> None:
+    """Write plain dict rows as JSON or CSV (format follows the suffix by default).
+
+    `field_order` puts known columns first in the CSV; anything else keeps its
+    own order after them. List values become '; '-joined cells.
+    """
+    fmt = fmt or ("csv" if path.suffix.lower() == ".csv" else "json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if fmt != "csv":
+        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    order = field_order or list(rows[0])
+    fields = [k for k in order if k in rows[0]] + [k for k in rows[0] if k not in order]
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                k: "; ".join(str(x) for x in v) if isinstance(v, list) else v
+                for k, v in ((k, row.get(k)) for k in fields)
+            })
+
+
 def save_matches(matches: list[Match], path: Path, fmt: str | None = None) -> None:
     fmt = fmt or ("csv" if path.suffix.lower() == ".csv" else "json")
     rows = [asdict(m) for m in matches]
     if fmt == "csv":
-        if not rows:
-            path.write_text("", encoding="utf-8")
-            return
-        extra = [k for k in rows[0] if k not in _CSV_ORDER]
-        fields = [k for k in _CSV_ORDER if k in rows[0]] + extra
-        with path.open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fields)
-            writer.writeheader()
-            for row in rows:
-                row = dict(row)
-                row["alternatives"] = _alts_str(row.get("alternatives"))
-                writer.writerow({k: row.get(k) for k in fields})
-    else:
-        path.write_text(
-            json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        # a list of dicts has no CSV cell — flatten the alternatives to one line
+        rows = [{**r, "alternatives": _alts_str(r.get("alternatives"))} for r in rows]
+    save_rows(rows, path, fmt, field_order=_CSV_ORDER)
+
+
+def slugify(name: str) -> str:
+    """Filename-safe slug, keeping cyrillic: "I'll be watching" -> 'i-ll-be-watching'."""
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^\w]+", "-", s, flags=re.UNICODE)  # \w keeps cyrillic letters
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "list"
 
 
 def _coerce_csv_row(row: dict) -> dict:
@@ -1209,6 +1384,20 @@ def _split(csv_value: str | None) -> list[str]:
     if not csv_value:
         return []
     return [p.strip() for p in csv_value.split(",") if p.strip()]
+
+
+def add_cookie_args(parser) -> None:
+    """Cookie-source flags (mirrors kinopoisk.core.add_http_args)."""
+    parser.add_argument("--cookie", help="IMDb Cookie string from the browser")
+    parser.add_argument("--cookie-file", help="file with the IMDb Cookie string")
+    parser.add_argument(
+        "--browser", action="append", dest="browsers", metavar="NAME",
+        help="browser to read cookies from (arc/chrome/...); repeatable",
+    )
+    parser.add_argument(
+        "--no-browser-cookie", action="store_true",
+        help="do not auto-pull cookies from the browser",
+    )
 
 
 def add_field_map_args(parser) -> None:
