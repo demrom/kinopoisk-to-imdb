@@ -413,18 +413,30 @@ python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --dry
 # for real; only movies you rated 8+
 python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --min-rating 8
 
-# undo: clear the ratings this file set (via deleteTitleRating)
-python -m imdb.ratings --from-matches out/imdb/from-kinopoisk/ratings.json --delete
+# undo that run: the report path is printed at the end of it
+python -m imdb.ratings --undo out/imdb/reports/ratings-20261011-093000.json
 ```
 
 Only `accept` rows carrying a 1–10 rating are set (`--include-flagged` also rates
-`review` rows). `rateTitle` is an upsert, so re-running is safe. Filters
-`--min-rating N`, `--only-positive`, `--limit N` apply as elsewhere.
+`review` rows). Filters `--min-rating N`, `--only-positive`, `--limit N` apply as
+elsewhere.
+
+Your current IMDb ratings are read first. A title you already rated the same is
+left alone, and one you rated differently keeps **your** rating unless you pass
+`--overwrite`. Re-running is safe.
+
+Every real run writes a report (`out/imdb/reports/ratings-<time>.json`, or
+`--report PATH`) recording what each title had before. It is written before the
+first change and again at the end, so a run cut short by an error or Ctrl-C
+still leaves one. `--undo <report>` puts back what the run changed: a rating
+that wasn't there is deleted, together with the watched mark the rating added
+(IMDb keeps that mark when a rating is deleted), and a rating you had is
+restored. Titles whose write failed are checked too, since a write can land
+even when IMDb's answer doesn't. A title you re-rated after the run is skipped.
+Reports from before `--undo` existed are refused.
 
 > **Review first.** A Kinopoisk `ratings.json` export has no original title, so
-> its matches resolve mostly to `review` — eyeball them before rating, since a
-> wrong rating has to be undone one title at a time (that's what `--delete` is
-> for).
+> its matches resolve mostly to `review` — eyeball them before rating.
 
 #### Mark titles watched — `imdb.watched`
 
@@ -434,8 +446,13 @@ To reflect what you've **watched** (e.g. a Kinopoisk "watched" content list),
 ```bash
 python -m imdb.watched --from-matches matches.json --dry-run
 python -m imdb.watched --from-matches matches.json                 # mark watched
-python -m imdb.watched --from-matches matches.json --unwatch       # undo
+python -m imdb.watched --undo out/imdb/reports/watched-20261011-093000.json  # undo
 ```
+
+Titles already marked watched are left alone. The run's report lists every title
+with whether it was watched before, and `--undo <report>` removes only the marks
+the run added, nothing of yours. It also skips a title you rated after the run,
+since a rating needs the mark.
 
 Filters `--min-rating N`, `--only-positive`, `--limit N` and `--include-flagged`
 apply as elsewhere. **Rating a title already marks it watched**, so if you ran

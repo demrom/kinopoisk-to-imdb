@@ -32,6 +32,7 @@ ROOT_FIELDS = {
     "DeleteTitleRating": "deleteTitleRating",
     "AddWatchedTitle": "addWatchedTitle",
     "RemoveWatchedTitle": "removeWatchedTitle",
+    "TitlesUserState": "titles",
 }
 
 
@@ -51,11 +52,18 @@ class FakeImdb:
     # list id -> entries {itemId, const, createdDate, typename}
     lists: dict[str, dict] = field(default_factory=dict)
     ratings: dict[str, int] = field(default_factory=dict)
+    # when each rating was set; a rating set by a test's setup dates from before the run
+    rated_at: dict[str, str] = field(default_factory=dict)
     watched: set[str] = field(default_factory=set)
     page_size: int = 250
     # break ExportList paging: "no-pageinfo", or "stale-cursor" (same cursor again)
     paging_fault: str | None = None
     pages_served: int = 0  # ExportList calls; capped so a paging loop fails, not hangs
+    # faults per (operation, titleId), on every retry: "error" (not applied), "null"
+    # (not applied, empty answer), "lost-ack" (applied, but the answer is an error)
+    # or "interrupt" (applied, then Ctrl-C before the answer); a callable is
+    # called as the request arrives
+    faults: dict[tuple[str, str], str] = field(default_factory=dict)
     # item ids the remove mutation pretends not to have removed
     refuse_removal: set[str] = field(default_factory=set)
     _ids: itertools.count = field(default_factory=lambda: itertools.count(1000))
@@ -107,7 +115,19 @@ class FakeImdb:
             return self._error("Authentication required")
         if not re.search(rf"\b{ROOT_FIELDS[op]}\b", body["query"]):
             return self._error(f"fake: {op} does not select {ROOT_FIELDS[op]}")
-        return 200, {}, json.dumps({"data": handler(v)})
+        fault = self.faults.get((op, v.get("titleId")))
+        if callable(fault):  # a peek at the world while this request is out
+            fault()
+        if fault == "error":
+            return self._error("fake: transient failure")
+        if fault == "null":
+            return 200, {}, json.dumps({"data": {ROOT_FIELDS[op]: None}})
+        data = handler(v)
+        if fault == "lost-ack":
+            return self._error("fake: timed out after applying")
+        if fault == "interrupt":  # Ctrl-C after IMDb applied it, before the answer
+            raise KeyboardInterrupt
+        return 200, {}, json.dumps({"data": data})
 
     @staticmethod
     def _error(message: str):
@@ -127,7 +147,8 @@ class FakeImdb:
             "originalTitleText": {"text": t.title},
             "titleType": {"id": t.kind},
             "releaseYear": {"year": t.year, "endYear": None},
-            "userRating": {"value": rating, "date": "2026-01-01T00:00:00Z"} if rating else None,
+            "userRating": {"value": rating, "date": self.rated_at.get(const, "2020-01-01T00:00:00Z")}
+            if rating else None,
             "userWatchedStatus": {"isWatched": const in self.watched, "firstWatched": None},
         }
 
@@ -169,6 +190,13 @@ class FakeImdb:
             "items": {"total": len(lst["entries"])},
         }} for lid, lst in self.lists.items()]}}
 
+    def _op_TitlesUserState(self, v):
+        return {"titles": [{
+            "id": const,
+            "userRating": {"value": self.ratings[const]} if const in self.ratings else None,
+            "userWatchedStatus": {"isWatched": const in self.watched},
+        } for const in v["ids"]]}
+
     def _op_AddConstToList(self, v):
         item_id = self.put(v["listId"], v["constId"], added="2026-06-01T00:00:00Z")
         return {"addItemToList": {"listId": v["listId"], "modifiedItem": {"itemId": item_id}}}
@@ -181,6 +209,7 @@ class FakeImdb:
 
     def _op_UpdateTitleRating(self, v):
         self.ratings[v["titleId"]] = v["rating"]
+        self.rated_at[v["titleId"]] = "2026-10-11T00:00:00Z"
         self.watched.add(v["titleId"])  # rating a title marks it watched on IMDb
         return {"rateTitle": {"rating": {"value": v["rating"]}}}
 
@@ -198,8 +227,9 @@ class FakeImdb:
 
 
 @pytest.fixture
-def imdb(monkeypatch):
+def imdb(monkeypatch, tmp_path):
     """The fake IMDb, wired in for the duration of one test."""
+    monkeypatch.chdir(tmp_path)  # default output paths land here, not in the repo
     monkeypatch.setattr(time, "sleep", lambda _s: None)
     monkeypatch.delenv("IMDB_COOKIE", raising=False)
     monkeypatch.delenv("IMDB_LIST_ID", raising=False)
