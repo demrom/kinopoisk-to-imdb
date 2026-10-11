@@ -480,6 +480,15 @@ Three things to know: items come out in list order (not the sort in your list UR
 | `IMDB_LIST_ID` | default target list id for `imdb.lists` (used when `--list-id` is omitted) |
 | `IMDB_UA` | custom `User-Agent` for IMDb requests |
 
+## Tests
+
+The tests run offline. They call the real commands (`imdb.search`, `imdb.lists`, `imdb.export`) against a fake IMDb that holds lists, ratings and watched marks in memory, and then check what that fake holds afterwards. Only the network and `time.sleep` are faked, so the suite takes well under a second and never touches your account.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
 ## Notes
 
 - Be gentle: keep the request rate low. Requests reuse your browser's own headers

@@ -1,0 +1,5 @@
+# Test-only dependencies, on top of the runtime ones.
+#   pip install -r requirements-dev.txt && python -m pytest
+-r requirements.txt
+pytest==9.1.1
+responses==0.26.3    # fakes IMDb at the HTTP boundary

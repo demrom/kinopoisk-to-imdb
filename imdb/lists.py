@@ -496,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
             to_add.append(m)
         else:
             skipped[reason] = skipped.get(reason, 0) + 1
-    if args.limit:
+    if args.limit is not None:  # --limit 0 must add nothing, not everything
         to_add = to_add[: args.limit]
 
     skip_note = ", ".join(f"{k}={v}" for k, v in sorted(skipped.items())) or "none"
