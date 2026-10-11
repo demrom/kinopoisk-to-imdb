@@ -1055,6 +1055,20 @@ def fetch_list_entries(
         time.sleep(pause)
 
 
+# Remove specific entries from one of your lists. Items are addressed by their
+# own id (li...), not by the title's const, so one copy of a duplicated title
+# can go while the other stays. Discovered on the live endpoint alongside
+# removeElementFromList (which takes a const instead).
+REMOVE_ITEMS_MUTATION = """
+mutation RemoveItemsFromList($listId: ID!, $itemIds: [ID!]!) {
+  removeItemsByItemIds(input: {listId: $listId, itemIds: $itemIds}) {
+    listId
+    itemIds
+  }
+}
+""".strip()
+
+
 USER_LISTS_QUERY = """
 query MyLists($first: Int!) {
   lists(filter: {}, first: $first) {
@@ -1090,6 +1104,22 @@ def fetch_user_lists(session: requests.Session, *, first: int = 250) -> list[dic
             "modified_at": node.get("lastModifiedDate"),
         })
     return out
+
+
+def remove_list_items(
+        session: requests.Session,
+        list_id: str,
+        item_ids: list[str],
+) -> list[str]:
+    """Remove list entries by their item ids (li...). Returns the ids removed."""
+    data = graphql(
+        session,
+        REMOVE_ITEMS_MUTATION,
+        {"listId": list_id, "itemIds": list(item_ids)},
+        operation_name="RemoveItemsFromList",
+    )
+    out = (data.get("data") or {}).get("removeItemsByItemIds") or {}
+    return out.get("itemIds") or []
 
 
 # --------------------------------------------------------------------------- #

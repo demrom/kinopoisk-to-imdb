@@ -31,7 +31,7 @@ account:
 | Module | Does | Needs login |
 | --- | --- | --- |
 | `imdb.search` | resolves records to IMDb ids via the public suggestion API | no |
-| `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`) | yes |
+| `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`), and cleans one up (`--dedupe` / `--empty`) | yes |
 | `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`) | yes |
 | `imdb.watched` | marks resolved titles watched / unwatched (`addWatchedTitle`) | yes |
 | `imdb.export` | reads one of your IMDb lists back out to JSON/CSV — with your ratings and watched marks | yes |
@@ -223,8 +223,8 @@ python -m imdb.lists \
     --list-id ls123456789
 ```
 
-Re‑running is safe — titles already in the list are detected and skipped. The
-sections below break down each command.
+Re‑running is safe — the target list is read first, so titles already in it are
+skipped instead of landing twice. The sections below break down each command.
 
 ### 1. Resolve to IMDb ids — `imdb.search`
 
@@ -371,9 +371,31 @@ python -m imdb.lists --from-matches <file> --list-id ls123456789 --min-rating 7
 
 `review` / `reject` / `unmatched` rows are skipped (`--include-flagged` adds
 `review` rows too). Filters: `--min-rating N`, `--only-positive`, `--limit N`.
-Titles already in the list are detected and skipped, and a bad/expired cookie
-aborts fast instead of hammering the API. Pass `--mark-watched` to also mark each
-added title watched in the same pass.
+A bad/expired cookie aborts fast instead of hammering the API. Pass
+`--mark-watched` to also mark each added title watched in the same pass.
+
+**Duplicates.** IMDb stores a second copy of a title without a word of complaint — an `AddConstToList` that repeats a const succeeds and the list simply grows another entry. So the target list is read *before* adding and titles already in it are skipped (`already-in-list`), as are consts repeated inside the input file (`repeated-in-file`); the dry run reports both counts, so it needs your cookies too. Cleaning up a list that already collected repeats — say from an earlier import — is the same command with a cleanup flag and no input file:
+
+```bash
+# drop repeated entries, keeping the oldest copy of each title
+python -m imdb.lists --list-id ls123456789 --dedupe --dry-run
+python -m imdb.lists --list-id ls123456789 --dedupe --report out/removed.json
+
+# ...across every list you own (one report file per list)
+python -m imdb.lists --all-lists --dedupe --dry-run
+
+# clear a list completely (e.g. after moving its titles elsewhere)
+python -m imdb.lists --list-id ls123456789 --empty --dry-run
+
+# take out exactly the titles some file lists (every copy of each)
+python -m imdb.lists watched.json --const-field const --list-id ls123456789 --remove --dry-run
+```
+
+All three read the list, print every entry they would drop (with its position and the date it was added), and only then remove them by item id via `removeItemsByItemIds` — 50 at a time, so a hiccup costs one batch. `--report` lists every planned entry with its outcome (`planned` on a dry run, then `removed` or `failed`); removal is not undoable, so run the dry run first. `--remove` is the add path in reverse: same input file, same row filters (`--min-rating`, `--only-positive`, `--include-flagged`), so "drop everything I rated below 5" is one command.
+
+`--dedupe` keeps the **oldest** entry of each title — the one carrying the earliest added-date, with its position in the list as the tie-break (the two can disagree if the list was reordered); entries that are neither a title nor a person, such as images, are left alone. `--all-lists` runs a removal mode over every list on the account (`imdb.export --list` shows them); it is refused together with `--empty`, which would clear the lot.
+
+Moving titles between lists is add-then-remove: export the source list, add the file to the target (titles already there skip themselves), then `--remove` that same file from the source — or `--empty` it, if everything was moved.
 
 #### Transfer your ratings — `imdb.ratings`
 
