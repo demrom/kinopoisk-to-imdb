@@ -22,9 +22,9 @@ The **`imdb`** package goes the other way — from a Kinopoisk export to your IM
 | Module | Does | Needs login |
 | --- | --- | --- |
 | `imdb.search` | resolves records to IMDb ids via the public suggestion API | no |
-| `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`), and cleans one up (`--dedupe` / `--empty`) | yes |
-| `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`) | yes |
-| `imdb.watched` | marks resolved titles watched / unwatched (`addWatchedTitle`) | yes |
+| `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`), keeps it equal to a file (`--prune`), and cleans one up (`--dedupe` / `--empty`) | yes |
+| `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`), keeping yours; `--undo` reverts a run | yes |
+| `imdb.watched` | marks resolved titles watched (`addWatchedTitle`); `--undo` reverts a run | yes |
 | `imdb.export` | reads one of your IMDb lists back out to JSON/CSV — with your ratings and watched marks | yes |
 
 `imdb/core.py` holds the shared bits: the session/cookies, the suggestion‑search client, the Kinopoisk→IMDb matcher, and the GraphQL client. See [Import into IMDb](#import-into-imdb) — and [Export an IMDb list](#export-an-imdb-list) for the one step that reads *from* IMDb rather than writing to it.
@@ -330,7 +330,7 @@ Only `accept` rows carrying a 1–10 rating are set (`--include-flagged` also ra
 
 Your current IMDb ratings are read first. A title you already rated the same is left alone, and one you rated differently keeps **your** rating unless you pass `--overwrite`. Re-running is safe.
 
-Every real run writes a report (`out/imdb/reports/ratings-<time>.json`, or `--report PATH`) recording what each title had before. It is written before the first change and again at the end, so a run cut short by an error or Ctrl-C still leaves one. `--undo <report>` puts back what the run changed: a rating that wasn't there is deleted, together with the watched mark the rating added (IMDb keeps that mark when a rating is deleted), and a rating you had is restored. Titles whose write failed are checked too, since a write can land even when IMDb's answer doesn't. A title you re-rated after the run is skipped. Reports from before `--undo` existed are refused.
+Every real run writes a report (`out/imdb/reports/ratings-<time>.json`, or `--report PATH`) recording what each title had before. It is written before the first change and updated before each request, so a run cut short by an error or Ctrl-C still leaves one. `--undo <report>` puts back what the run changed: a rating that wasn't there is deleted, together with the watched mark the rating added (IMDb keeps that mark when a rating is deleted), and a rating you had is restored. Titles whose write failed are checked too, since a write can land even when IMDb's answer doesn't. A title you re-rated after the run is skipped. If undo clears a rating but can't remove its watched mark, it says so; remove the mark on IMDb. Reports from before `--undo` existed are refused.
 
 > **Review first.** A Kinopoisk `ratings.json` export has no original title, so its matches resolve mostly to `review` — eyeball them before rating.
 
