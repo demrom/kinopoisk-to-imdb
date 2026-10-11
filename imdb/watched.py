@@ -42,6 +42,7 @@ from .core import (
     DECISION_NO,
     DECISION_REVIEW,
     Match,
+    add_cookie_args,
     add_field_map_args,
     field_map_from_args,
     load_matches,
@@ -52,20 +53,6 @@ from .core import (
     resolve_records,
     unmark_watched,
 )
-
-
-def add_cookie_args(parser: argparse.ArgumentParser) -> None:
-    """Cookie-source flags (mirrors imdb.lists.add_cookie_args)."""
-    parser.add_argument("--cookie", help="IMDb Cookie string from the browser")
-    parser.add_argument("--cookie-file", help="file with the IMDb Cookie string")
-    parser.add_argument(
-        "--browser", action="append", dest="browsers", metavar="NAME",
-        help="browser to read cookies from (arc/chrome/...); repeatable",
-    )
-    parser.add_argument(
-        "--no-browser-cookie", action="store_true",
-        help="do not auto-pull cookies from the browser",
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:

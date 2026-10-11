@@ -12,12 +12,15 @@ Two thin siblings on top of a shared core:
                  the rateTitle mutation. Needs your IMDb cookies.
 - imdb.watched — mark resolved titles watched (or unmark) via the
                  addWatchedTitle mutation. Needs your IMDb cookies.
+- imdb.export  — the one step that reads *from* IMDb: pulls one of your lists
+                 into JSON/CSV, with your ratings and watched marks.
 
 Run a step as a module, e.g.:
     python -m imdb.search movies.json -o matches.json
     python -m imdb.lists --from-matches matches.json --list-id ls123456789
     python -m imdb.ratings --from-matches matches.json --dry-run
     python -m imdb.watched --from-matches matches.json --dry-run
+    python -m imdb.export ls123456789
 """
 
 from .core import ImdbTitle, Match

@@ -34,10 +34,11 @@ account:
 | `imdb.lists` | adds resolved ids to an IMDb list (`AddConstToList`) | yes |
 | `imdb.ratings` | sets your 1–10 rating on resolved titles (`rateTitle`) | yes |
 | `imdb.watched` | marks resolved titles watched / unwatched (`addWatchedTitle`) | yes |
+| `imdb.export` | reads one of your IMDb lists back out to JSON/CSV — with your ratings and watched marks | yes |
 
 `imdb/core.py` holds the shared bits: the session/cookies, the suggestion‑search
 client, the Kinopoisk→IMDb matcher, and the GraphQL client. See
-[Import into IMDb](#import-into-imdb).
+[Import into IMDb](#import-into-imdb) — and [Export an IMDb list](#export-an-imdb-list) for the one step that reads *from* IMDb rather than writing to it.
 
 ## Requirements
 
@@ -171,6 +172,8 @@ Each file is a JSON list (or CSV) of movie objects. Common fields:
 `user_rating`, `user_rating_sentiment`, `poster`. Content‑list cards also carry
 `original_title`, `countries`, `directors`, `actors`, `duration_min`, plus
 `list_id`, `list_name`, `list_position` and `added_at`.
+
+Resolved matches land under `out/imdb/from-kinopoisk/` (mirroring the tree above), and lists read back out of IMDb under `out/imdb/lists/<ls-id>-<slug>.json`.
 
 `out/` is git‑ignored — it is your personal data and never committed.
 
@@ -417,6 +420,32 @@ apply as elsewhere. **Rating a title already marks it watched**, so if you ran
 `imdb.ratings` those are covered — `imdb.watched` is for titles you watched but
 didn't rate. (Adding to a list anyway? `imdb.lists --mark-watched` does both in
 one pass.)
+
+## Export an IMDb list
+
+`imdb.export` goes the other way round: it pulls one of **your own** IMDb lists into JSON/CSV, and every row carries both the title's facts and your data on it — the rating you gave, when you gave it, whether it is marked watched and when you first watched it. A private list is only visible to its owner, so this needs your IMDb cookies, like the apply steps above.
+
+```bash
+# the catalog of your lists: id, size, type, name
+python -m imdb.export --list
+
+# both lists -> out/imdb/lists/<ls-id>-<slug>.json
+python -m imdb.export ls123456789 ls987654321
+
+# a spreadsheet instead, or somewhere specific (single list only)
+python -m imdb.export ls123456789 --format csv
+python -m imdb.export ls123456789 -o ~/Desktop/watchlist.csv
+
+# only what you actually watched / rated
+python -m imdb.export ls123456789 --watched-only
+python -m imdb.export ls123456789 --rated-only
+```
+
+Per row: `list_position`, `const`, `title`, `original_title`, `year`, `end_year`, `kind`, `user_rating`, `user_rated_at`, `watched`, `watched_at`, `imdb_rating`, `num_votes`, `genres`, `runtime_min`, `release_date`, `directors`, `url`, `added_at`, `note`, `item_id`, `list_id`, `list_name`. The `item_id` (`li…`) is the handle on that particular *entry*: a list can hold the same title twice, and then the const no longer identifies a row.
+
+Those key names are the Kinopoisk export's, so an exported list feeds straight back into the rest of the tool — `python -m imdb.search <file> --const-field const` turns it into a matches file (the ids are trusted, nothing is searched) carrying your ratings, which `imdb.ratings` / `imdb.watched` can then apply elsewhere.
+
+Three things to know: items come out in list order (not the sort in your list URL); `directors` is empty for series, which IMDb credits to creators instead; and a list holding people exports them as `kind: person` with no title facts (anything else, such as an image, gets its own lowercase type).
 
 ## Environment variables
 
