@@ -208,3 +208,120 @@ def test_empty_clears_a_list_bigger_than_one_removal_batch(imdb):
     assert lists.main(["--list-id", ls, "--empty", *AUTH]) == 0
 
     assert imdb.consts(ls) == []
+
+
+def test_prune_makes_the_list_match_the_file(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt1")
+    imdb.put(ls, "tt9")              # not in the file: goes
+    person = imdb.put(ls, "nm1", typename="Name")  # a titles file says nothing of people
+    image = imdb.put(ls, None, typename="Image")
+    m = matches_file(tmp_path, [{"const": c, "title": c} for c in ("tt1", "tt2", "tt3")])
+    decide(m, {"tt3": "review"})     # might belong: kept if present, not added
+
+    imdb.put(ls, "tt3")
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", *AUTH]) == 0
+
+    assert imdb.consts(ls) == ["tt1", "nm1", None, "tt3", "tt2"]
+    assert {person, image} <= set(imdb.item_ids(ls))
+
+
+def test_prune_is_refused_while_some_rows_have_no_imdb_id(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt9")
+    m = matches_file(tmp_path, [{"const": "tt1", "title": "One"}])
+    rows = json.loads(m.read_text(encoding="utf-8"))
+    rows.append({**rows[0], "imdb_const": None, "decision": "unmatched", "src_title": "Lost"})
+    m.write_text(json.dumps(rows), encoding="utf-8")
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", *AUTH]) == 2
+
+    assert imdb.consts(ls) == ["tt9"]
+
+
+def test_prune_dry_run_changes_nothing(imdb, tmp_path, capsys):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt9")
+    m = matches_file(tmp_path, [{"const": "tt1", "title": "One"}])
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", "--dry-run", *AUTH]) == 0
+
+    assert imdb.consts(ls) == ["tt9"]
+    assert "tt9" in capsys.readouterr().err  # shows what would go
+
+
+def test_prune_drops_rejected_and_filtered_out_titles_and_reports_them(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    rejected = imdb.put(ls, "tt1")
+    low = imdb.put(ls, "tt2")
+    imdb.put(ls, "tt3")
+    src = tmp_path / "kp.json"
+    src.write_text(json.dumps([{"const": "tt1", "title": "One", "user_rating": 9},
+                               {"const": "tt2", "title": "Two", "user_rating": 4},
+                               {"const": "tt3", "title": "Three", "user_rating": 8}]),
+                   encoding="utf-8")
+    m = tmp_path / "matches.json"
+    assert search.main([str(src), "--const-field", "const", "-o", str(m)]) == 0
+    decide(m, {"tt1": "reject"})
+    report = tmp_path / "sync.json"
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", "--min-rating", "7",
+                       "--report", str(report), *AUTH]) == 0
+
+    assert imdb.consts(ls) == ["tt3"]
+    added = json.loads(report.read_text(encoding="utf-8"))
+    assert added == []  # nothing to add; the removals went to their own file
+    pruned = json.loads((tmp_path / "sync.prune.json").read_text(encoding="utf-8"))
+    assert {(r["item_id"], r["outcome"]) for r in pruned} == {(rejected, "removed"), (low, "removed")}
+
+
+def test_prune_does_not_mix_with_removal_modes(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt9")
+    m = matches_file(tmp_path, [{"const": "tt1", "title": "One"}])
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", "--remove", *AUTH]) == 2
+
+    assert imdb.consts(ls) == ["tt9"]
+
+
+def test_prune_keeps_titles_under_review_whatever_the_filters(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt1")
+    src = tmp_path / "kp.json"
+    src.write_text(json.dumps([{"const": "tt1", "title": "One", "user_rating": 4},
+                               {"const": "tt2", "title": "Two", "user_rating": 8}]),
+                   encoding="utf-8")
+    m = tmp_path / "matches.json"
+    assert search.main([str(src), "--const-field", "const", "-o", str(m)]) == 0
+    decide(m, {"tt1": "review"})
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune",
+                       "--include-flagged", "--min-rating", "7", *AUTH]) == 0
+
+    assert imdb.consts(ls) == ["tt1", "tt2"]
+
+
+def test_prune_with_every_row_rejected_empties_the_titles(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.put(ls, "tt1")
+    imdb.put(ls, "tt9")
+    imdb.put(ls, "nm1", typename="Name")
+    m = matches_file(tmp_path, [{"const": "tt1", "title": "One"}])
+    decide(m, {"tt1": "reject"})
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--prune", *AUTH]) == 0
+
+    assert imdb.consts(ls) == ["nm1"]
+
+
+def test_an_add_imdb_does_not_confirm_is_a_failure(imdb, tmp_path):
+    ls = imdb.new_list("ls1")
+    imdb.faults[("AddConstToList", "tt1")] = "null"
+    m = matches_file(tmp_path, [{"const": "tt1", "title": "One"}])
+    report = tmp_path / "r.json"
+
+    assert lists.main(["--from-matches", str(m), "--list-id", ls, "--report", str(report), *AUTH]) == 1
+
+    [row] = json.loads(report.read_text(encoding="utf-8"))
+    assert row["outcome"].startswith("error")

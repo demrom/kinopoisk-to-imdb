@@ -115,7 +115,7 @@ class FakeImdb:
             return self._error("Authentication required")
         if not re.search(rf"\b{ROOT_FIELDS[op]}\b", body["query"]):
             return self._error(f"fake: {op} does not select {ROOT_FIELDS[op]}")
-        fault = self.faults.get((op, v.get("titleId")))
+        fault = self.faults.get((op, v.get("titleId") or v.get("constId")))
         if callable(fault):  # a peek at the world while this request is out
             fault()
         if fault == "error":

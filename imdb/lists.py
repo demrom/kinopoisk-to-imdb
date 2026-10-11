@@ -11,7 +11,9 @@ IMDb stores a second copy of a title without complaining, so the list is read
 before adding and titles already in it are skipped. The same reading powers the
 removal modes: --dedupe drops repeated entries (keeping the earliest copy),
 --empty drops every entry, and --remove drops the titles your input file names.
-All take --dry-run, and removal is not undoable.
+--prune syncs: after adding, it drops the titles the input file doesn't have, so
+the list ends up equal to the file. All take --dry-run, and removal is not
+undoable.
 
 By default it skips rows with no match and rows flagged for review (a wrong add
 is annoying to undo); pass --include-flagged to add them too. Use --dry-run
@@ -36,6 +38,9 @@ Examples:
     python -m imdb.lists --list-id ls123456789 --dedupe --dry-run
     python -m imdb.lists --list-id ls123456789 --empty --dry-run
 
+    # make the list equal to a file: add what's missing, drop what isn't there
+    python -m imdb.lists --from-matches matches.json --list-id ls123456789 --prune --dry-run
+
     # drop exactly what a file lists (the add path, in reverse)
     python -m imdb.lists watched.json --const-field const --list-id ls123456789 --remove
 """
@@ -53,6 +58,7 @@ from pathlib import Path
 from .core import (
     DECISION_NO,
     DECISION_REVIEW,
+    DECISION_UNMATCHED,
     LIST_ENV,
     Match,
     add_cookie_args,
@@ -124,6 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--remove", action="store_true",
         help="remove the input file's titles from the list instead of adding "
              "them (every copy of each); the same row filters apply",
+    )
+    p.add_argument(
+        "--prune", action="store_true",
+        help="sync: after adding, also remove the titles the input file doesn't "
+             "have (every copy). Titles of rows under review stay; refused while "
+             "some rows have no IMDb id. Removes titles only, never people or "
+             "images",
     )
     p.add_argument(
         "--mark-watched", action="store_true",
@@ -201,6 +214,12 @@ def eligible(m: Match, args) -> tuple[bool, str | None]:
     if args.only_positive and m.src_sentiment != "positive":
         return False, "not-positive"
     return True, None
+
+
+def _under_review(m: Match) -> bool:
+    """Still undecided: its title may belong in the list whatever the filters say."""
+    dec = (m.decision or "").strip().lower()
+    return dec == DECISION_REVIEW or (not dec and m.ambiguous)
 
 
 def _label(m: Match) -> str:
@@ -331,6 +350,7 @@ def remove_entries(
         list_id: str,
         consts: set[str] | None = None,
         report: str | None = None,
+        what: str | None = None,
 ) -> int:
     """The removal path: read one list, then take out what the mode says."""
     print(f"Reading list {list_id}...", file=sys.stderr)
@@ -343,7 +363,9 @@ def remove_entries(
     if args.limit is not None:  # --limit 0 must remove nothing, not everything
         doomed = doomed[: args.limit]
 
-    if args.empty:
+    if what:
+        pass
+    elif args.empty:
         what = "every entry"
     elif consts is not None:
         in_list = {(n.get("item") or {}).get("id") for n in nodes} & consts
@@ -429,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.remove and (args.dedupe or args.empty):
         print("ERROR: --remove takes an input file, not --dedupe/--empty", file=sys.stderr)
         return 2
+    if args.prune and (args.remove or args.dedupe or args.empty or args.all_lists):
+        print("ERROR: --prune goes with adding to one list, not with removal modes",
+              file=sys.stderr)
+        return 2
     if args.all_lists and not (args.dedupe or args.empty or args.remove):
         print("ERROR: --all-lists is for removal modes only, not adding", file=sys.stderr)
         return 2
@@ -437,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     list_id = args.list_id or os.environ.get(LIST_ENV)
-    if not list_id and not args.dry_run and not args.all_lists:
+    if not list_id and (args.prune or not (args.dry_run or args.all_lists)):
         print(f"ERROR: no list id (pass --list-id or set ${LIST_ENV})", file=sys.stderr)
         return 2
 
@@ -463,6 +489,27 @@ def main(argv: list[str] | None = None) -> int:
             consts={m.imdb_const for m in matches if eligible(m, args)[0]},
         )
 
+    # What the list keeps under --prune: every title the file would add, plus
+    # those of rows still under review (they may belong). A row with no IMDb id
+    # could be any entry of the list, so pruning waits until each is decided.
+    keep: set[str] = set()
+    if args.prune:
+        unknown = [
+            m for m in matches
+            if not m.matched
+            and (m.decision or "").strip().lower() not in DECISION_NO - {DECISION_UNMATCHED}
+        ]
+        if unknown:
+            print(
+                f"ERROR: --prune: {len(unknown)} row(s) have no IMDb id, and one of "
+                "them may already be in the list (first: "
+                f"{unknown[0].src_title!r}). Fill in imdb_const or set decision "
+                "to reject, then run again.",
+                file=sys.stderr,
+            )
+            return 2
+        keep = {m.imdb_const for m in matches if m.matched and (eligible(m, args)[0] or _under_review(m))}
+
     # IMDb stores a second copy of a title without complaint, so "already in the
     # list" has to be read from the list itself before adding, not inferred from
     # a mutation error.
@@ -473,6 +520,9 @@ def main(argv: list[str] | None = None) -> int:
             existing = {(n.get("item") or {}).get("id") for n in nodes}
             print(f"List {list_id} holds {len(existing)} distinct titles.", file=sys.stderr)
         except Exception as err:  # noqa: BLE001 — fall back to adding blind
+            if args.prune:  # but never prune blind
+                print(f"ERROR: could not read list {list_id}: {err}", file=sys.stderr)
+                return 1
             print(
                 f"WARNING: could not read list {list_id} ({err}); "
                 "duplicates may be added",
@@ -534,7 +584,8 @@ def main(argv: list[str] | None = None) -> int:
                 outcome = "duplicate"
                 print(f"[{i}/{total}] = already in list: {label}", file=sys.stderr)
             else:
-                add_to_list(session, list_id, m.imdb_const)
+                if not (add_to_list(session, list_id, m.imdb_const).get("modifiedItem") or {}).get("itemId"):
+                    raise RuntimeError("IMDb did not confirm the add")
                 added += 1
                 in_list = True
                 outcome = "added"
@@ -594,6 +645,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.mark_watched:
             line += f" Watched: {watched_ok} marked, {watched_failed} failed."
         print(line, file=sys.stderr)
+
+    if args.prune:
+        # lists get titles only, so only titles go: people and images stay
+        extras = {c for c in existing if c and c.startswith("tt")} - keep
+        rc = remove_entries(
+            args, session, list_id, consts=extras,
+            # its own file, next to the add report rather than over it
+            report=str(Path(args.report).with_suffix(".prune.json")) if args.report else None,
+            what=f"titles the input file doesn't have ({len(extras)})",
+        )
+        return 1 if failed or rc else 0
     return 0 if failed == 0 else 1
 
 

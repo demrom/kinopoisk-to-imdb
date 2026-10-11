@@ -297,6 +297,15 @@ All three read the list, print every entry they would drop (with its position an
 
 `--dedupe` keeps the **oldest** entry of each title — the one carrying the earliest added-date, with its position in the list as the tie-break (the two can disagree if the list was reordered); entries that are neither a title nor a person, such as images, are left alone. `--all-lists` runs a removal mode over every list on the account (`imdb.export --list` shows them); it is refused together with `--empty`, which would clear the lot.
 
+To keep an IMDb list equal to a Kinopoisk list, add with `--prune`: it adds what is missing, then removes every title the file doesn't have.
+
+```bash
+python -m imdb.lists --from-matches out/imdb/from-kinopoisk/content-lists/12345678-my-list.json \
+    --list-id ls123456789 --prune --dry-run
+```
+
+Pruning keeps the titles of rows still under `review`, since they may belong, even when a filter skips them, and drops those of rejected or filtered-out rows (`--min-rating` and the like). It refuses to run while any row has no IMDb id: that title could already be in the list under an id the file doesn't know. Fill in `imdb_const` or set `decision` to `reject` first. It removes titles only: people and images in the list stay. `--limit` caps the additions and the removals separately, and `--report out/x.json` writes the removals to `out/x.prune.json`.
+
 Moving titles between lists is add-then-remove: export the source list, add the file to the target (titles already there skip themselves), then `--remove` that same file from the source — or `--empty` it, if everything was moved.
 
 #### Transfer your ratings — `imdb.ratings`
