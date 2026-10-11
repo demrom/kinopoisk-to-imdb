@@ -29,6 +29,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
@@ -943,6 +944,76 @@ def unmark_watched(session: requests.Session, const: str) -> dict:
         operation_name="RemoveWatchedTitle",
     )
     return (data.get("data") or {}).get("removeWatchedTitle") or {}
+
+
+# Your own state on any titles, not just list items: the rating you gave and
+# the watched mark. Read before every write so a run never clobbers what you
+# set yourself. Validated against the live endpoint: ~190 ids answer in one
+# call, and an unknown id doesn't fail the batch.
+USER_STATE_QUERY = """
+query TitlesUserState($ids: [ID!]!) {
+  titles(ids: $ids) {
+    id
+    userRating { value }
+    userWatchedStatus { isWatched }
+  }
+}
+""".strip()
+
+USER_STATE_BATCH = 100
+
+
+def fetch_user_state(session: requests.Session, consts: list[str]) -> dict[str, dict]:
+    """{const: {"rating": int | None, "watched": bool}} for every const IMDb
+    answered for. A const missing from the result is unknown, not unrated."""
+    ids = list(dict.fromkeys(consts))
+    state: dict[str, dict] = {}
+    for start in range(0, len(ids), USER_STATE_BATCH):
+        data = graphql(
+            session,
+            USER_STATE_QUERY,
+            {"ids": ids[start:start + USER_STATE_BATCH]},
+            operation_name="TitlesUserState",
+        )
+        for t in (data.get("data") or {}).get("titles") or []:
+            if t and t.get("id"):
+                state[t["id"]] = {
+                    "rating": (t.get("userRating") or {}).get("value"),
+                    "watched": bool((t.get("userWatchedStatus") or {}).get("isWatched")),
+                }
+    return state
+
+
+REPORT_DIR = Path("out/imdb/reports")
+
+
+def write_report(rows: list[dict], path: str | None, kind: str) -> Path:
+    """Write a per-item report; without an explicit path, a new timestamped one
+    under out/imdb/reports/ — a real run always leaves one, since --undo needs it."""
+    if path:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        stem, n = f"{kind}-{time.strftime('%Y%m%d-%H%M%S')}", 1
+        while True:  # claim a fresh name: two runs in one second must not share a report
+            p = REPORT_DIR / (f"{stem}.json" if n == 1 else f"{stem}-{n}.json")
+            try:
+                p.open("x").close()
+                break
+            except FileExistsError:
+                n += 1
+    # write aside and swap in, so a failed rewrite keeps the previous copy; the
+    # temp name is fresh, so it can't be some other file (an --undo input, say)
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=f".{p.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, p)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return p
 
 
 # Read one of your lists: its metadata plus a page of items, each carrying both
